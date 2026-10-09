@@ -18,3 +18,9 @@ Ten scenarios, each with code from both versions:
 - I. Events, which are new.
 - J. Deploying and submitting, which now cost fees and need a payer
 
+## Towards v0.4 (research notes, 2026-10-09)
+
+- ACTOR_MODEL_0.4.md: the "transactional actors" model in draft PR #935, how it maps from plan/apply and shards, what breaks, stated benefits. Public sources only.
+- CORE_API_STABILITY.md: will the `lee_core` API (and the wallet/FFI layers above it) change? Module by module.
+- PRIVATE_TX_CONTENTION.md: was the one-private-tx limit lifted in v0.3? Partially; what remains and what actors change.
+
