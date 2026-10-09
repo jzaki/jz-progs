@@ -47,7 +47,7 @@ Only an inference from tests; the branch has no text about contention.
 - `TransactionEntry<R>` (`execution_state.rs:17`) has a single root `Call` or `Cast`, consistent with "a proof claims at most one consumed message".
 - Net: the model lets writers enqueue instead of updating shared state, which is the point of asynchronous messaging. The private receiver's own account update remains serialised.
 
-## 6. Where the idea comes from
+## 6. Related claims and roadmap items
 
-- The "one transaction per block (per program)" claim was heard second-hand and could not be found in any public source. It is unclear whether it refers to the public-state race (now fixed) or the private-account nullifier (still there); the evidence above is consistent with the latter.
-- `logos-co/roadmap` `content/blockchain/roadmap/lez_state_contention.md` (owner David Rusu): "State contention is a fundamental challenge in the private execution model" and "Solution may introduce centralized actors to sequence access to private state". Checklist: **study complete [ ]**, **approach proposed [ ]**, both unchecked, no date. Note this "actors" is a sequencing-service idea, not the program model.
+- A "one transaction per block (per program)" limit is sometimes claimed; no public source states it. It is unclear whether it refers to the public-state race (now fixed) or the private-account nullifier (still there); the evidence above is consistent with the latter.
+- `logos-co/roadmap` `content/blockchain/roadmap/lez_state_contention.md`: "State contention is a fundamental challenge in the private execution model" and "Solution may introduce centralized actors to sequence access to private state". Checklist: **study complete [ ]**, **approach proposed [ ]**, both unchecked, no date. Note this "actors" is a sequencing-service idea, not the program model.

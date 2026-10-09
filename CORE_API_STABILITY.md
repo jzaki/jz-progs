@@ -9,7 +9,7 @@ Researched 2026-10-09. Public sources only.
 The name is ambiguous, so this file covers both readings. Say which one you meant if it matters.
 
 1. **`lee_core`, the Rust crate** at `lee/state_machine/core` (package version `0.1.0`). This is what guest programs and tooling import (`lee_core::program::...`, `lee_core::account::...`). Sections 1–3 are about this.
-2. **The "LEZ Core Module"**: a Logos Core (C++) module, module name `lez_core`, class `LEZCoreModule`, that is "the shared backend for all LEZ apps" (roadmap item [`lez_core_module.md`](https://github.com/logos-co/roadmap/blob/v5/content/blockchain/roadmap/lez_core_module.md), owner David Rusu). **Repo: [logos-blockchain/logos-execution-zone-module](https://github.com/logos-blockchain/logos-execution-zone-module)** (local clone `~/src/logos-blockchain/logos-execution-zone-module`; API in `src/lez_core_module.h`, 34 methods). It is a thin wrapper over the LEZ `wallet_ffi.h`. Section 4 analyses it.
+2. **The "LEZ Core Module"**: a Logos Core (C++) module, module name `lez_core`, class `LEZCoreModule`, that is "the shared backend for all LEZ apps" (roadmap item [`lez_core_module.md`](https://github.com/logos-co/roadmap/blob/v5/content/blockchain/roadmap/lez_core_module.md)). **Repo: [logos-blockchain/logos-execution-zone-module](https://github.com/logos-blockchain/logos-execution-zone-module)** (API in `src/lez_core_module.h`, 34 methods). It is a thin wrapper over the LEZ `wallet_ffi.h`. Section 4 analyses it.
 
 ## 1. The crate itself
 
@@ -56,7 +56,7 @@ The name is ambiguous, so this file covers both readings. Say which one you mean
 - It builds against LEZ's `wallet_ffi` and pins a LEZ `dev` revision in `flake.nix`: `24789fb` (comment: "latest breaking changes on dev, including removal of amm, ata, token programs and statistics collection removal"). That pin is 23 commits behind `origin/dev` and is **not** the actor branch.
 - Method groups: wallet lifecycle (`create_new`, `open`, `save`, `restore_storage`), accounts (`create_account_public/private`, `list_accounts`, `get_balance`, `get_account_public/private`, key getters, base58 helpers), sync, six transfer variants (`transfer_public`, `_shielded`, `_deshielded`, `_private`, `_shielded_owned`, `_private_owned`), `send_generic_public_transaction`, `send_generic_private_transaction`, `send_program_deployment_transaction`, `poll_transaction_status`, `bridge_withdraw`, labels.
 - Stability so far: since 2026-07-31 it has had a LEZ bump or breaking adaptation about every one to two weeks (v0.2.2 bump 08-05; wallet fees/payer 09-09; "adapt to wallet-ffi on dev" 09-28; v0.3.0 bumps 09-30 and 10-01; `feat!: breaking update` 10-07; breaking cleanup merge 10-09). Open PRs: a Windows nix build (#58), a host-owned default profile (#47), a macOS doctest fix (#28).
-- Known consumers in your local checkouts (not read): `logos-execution-zone-wallet-ui`, `logos-amm-module`, `lez-indexer-module`. The roadmap says all LEZ apps share this module as their backend.
+- Other repos that appear to build on it (not read): `logos-execution-zone-wallet-ui`, `logos-amm-module`, `lez-indexer-module`. The roadmap says all LEZ apps share this module as their backend.
 
 ### 4.2 Impact of PR #935 on it
 
