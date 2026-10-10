@@ -8,7 +8,7 @@ The issues link code at `f7fda38a4` and `079e4fb6b` on `dev`, and both commits a
 | Issue | Journey | Relevance to writing a program | Runnable check from the issue |
 |---|---|---|---|
 | #509 | Incremental updates: the `plan`/`apply` program ABI | **Core.** This is the ABI every v0.3 program is written against | `RISC0_DEV_MODE=1 cargo test --release -p lee_core execution_state` |
-| #514 | Fees for public transactions | **Core.** Every user public tx must declare a fee, including deploys and calls | Local walkthrough with exact balances (section 5 uses it) |
+| #514 | Fees for public transactions | **Core.** Every user public tx must declare a fee, including deploys and calls | Local walkthrough with exact balances ([INTRO.md](INTRO.md) section 3 uses it) |
 | #507 | Event exposure | High. Programs emit events, and clients query them from the indexer | `RISC0_DEV_MODE=1 cargo test --release -p indexer_core accept_block_captures_emitted_events` |
 | #508 | Private authorization key (`ask`) | High for any program that checks `is_authorized` on private accounts | `RISC0_DEV_MODE=1 cargo test --release -p lee ask` |
 | #506 | Cross-zone messaging | Medium. Writing emitter and target programs between zones | `just demo-cross-zone-bridge` (needs Docker) |
@@ -17,7 +17,7 @@ The issues link code at `f7fda38a4` and `079e4fb6b` on `dev`, and both commits a
 
 ### 6.1 Program ABI: `plan` and `apply` (#509)
 
-The program no longer receives account state or returns a post-state. Programs written against the old `ProgramOutput`/`AccountPostState` ABI **no longer compile**, and that includes the LEZ v0.1.2 code scaffold generates (section 3).
+The program no longer receives account state or returns a post-state. Programs written against the old `ProgramOutput`/`AccountPostState` ABI **no longer compile**, and that includes the v0.2.4 hello world in [INTRO.md](INTRO.md) section 2.
 
 - **`plan(input: &PlanInput, instruction) -> Plan`.** It can't see any account data. `PlanInput` has `self_account_id`, `caller_account_id`, `accounts: Vec<AccountMeta>` (id, `is_authorized`, `program_account_id`; no data) and `instruction_data`. The `Plan` builder collects the program's intents:
   - `plan.effect(account, &effect)`: change this program's shard on a named account handle
@@ -48,13 +48,13 @@ The program no longer receives account state or returns a post-state. Programs w
 - **Selector convention.** Take the first 8 bytes of `sha256("<program>::<EventName>")`. Store it as a constant next to a `SELECTOR_NAME` string, with a unit test that checks the derivation. Nothing enforces this at runtime. The model is `lez/programs/bridge/core/src/event.rs` (`"bridge::Deposit"`), emitted in `lez/programs/bridge/src/main.rs`.
 - **Events aren't stored in blocks.** The indexer re-derives them by re-executing each block (`TxEvents { tx_index, tx_hash, events }`).
 - **Reading.** Use indexer JSON-RPC `getEvents` (filter by `tx_hash`, or `from_block`/`to_block`, plus optional `program_account_id` and hex `selector`) and `subscribeToEvents`. FFI equivalents: `query_events` on the indexer and `sequencer_ffi_query_events` on the sequencer.
-- **Common problem.** The indexer's `event_filter` config controls what is kept. Shipped configs use `"archival"`. **With no filter configured, nothing is kept**, and every query fails as `UncoveredEventQuery`. Check this first when events "don't work". Events also need an indexer, which the section 5 setup doesn't run (`just run-indexer`).
+- **Common problem.** The indexer's `event_filter` config controls what is kept. Shipped configs use `"archival"`. **With no filter configured, nothing is kept**, and every query fails as `UncoveredEventQuery`. Check this first when events "don't work". Events also need an indexer, which the local setup in [INTRO.md](INTRO.md) section 3 doesn't run (`just run-indexer`).
 
 ### 6.4 Private authorization key, `ask` (#508)
 
 - **Key hierarchy.** Keys derive in this order: `ssk` → `ask` → `nsk` → `npk`. The viewing key `vsk` derives from `ssk` separately. Holding `nsk`/`vsk` lets someone track, decrypt and update a private account, but only `ask` makes the update **authorized**.
 - **For program authors.** A private account's `is_authorized` is true only when a valid `ask` was supplied. **Without `ask` the account can still be spent and updated**: only programs that check `is_authorized` on their accounts refuse it. A transaction signer entry can't stand in for a missing `ask`. Any program that guards a private account's shard must check authorization itself, as `hello_world_with_authorization` does.
-- Private PDAs use a different scheme: (authority program, seed) grants limited to the called program and the programs it calls in turn. `tail_call_with_pda` in section 4 shows the public version.
+- Private PDAs use a different scheme: (authority program, seed) grants limited to the called program and the programs it calls in turn. `tail_call_with_pda` in [INTRO.md](INTRO.md) section 5 shows the public version.
 
 ### 6.5 Cross-zone messaging (#506)
 
@@ -67,7 +67,7 @@ The program no longer receives account state or returns a post-state. Programs w
 ### 6.6 L1 bridge and funding (#510)
 
 - The **only way** funds enter a zone is a Bedrock `DepositOp` on the zone's channel. The sequencer turns it into a mint through the `bridge` program, with a receipt PDA so each deposit is minted exactly once and a `bridge::Deposit` event. The bridge escrow starts at `u128::MAX` (the unissued supply) and can only increase.
-- **Genesis funding uses the same path.** Each `supply_account` entry becomes a synthetic deposit (`/LEZ/v0.3/GenesisDeposit`). That's why section 5 imports genesis keys rather than using a faucet.
+- **Genesis funding uses the same path.** Each `supply_account` entry becomes a synthetic deposit (`/LEZ/v0.3/GenesisDeposit`). That's why [INTRO.md](INTRO.md) section 3 imports genesis keys rather than using a faucet.
 - **Withdrawals are disabled in v0.3**: `Withdraw` panics. There is no first-party CLI for making a deposit.
 - **For program authors:** user transactions can't call `bridge::Deposit` (they are dropped). Programs can't touch the escrow except to increase it.
 
@@ -81,13 +81,13 @@ It also shows another funding pattern, `wallet auth-transfer send` from a genesi
 
 ### What this means for the docs
 
-- **#509 and #514 are prerequisites** for a "write and deploy an LEZ program" page at v0.3. The existing scaffold page (section 1) and the LEZ example README (section 4) both predate them.
+- **#509 and #514 are prerequisites** for a "write and deploy an LEZ program" page at v0.3. The docs site's scaffold page and the LEZ example README ([INTRO.md](INTRO.md) section 5) both predate them.
 - **A v0.3 programming guide needs these pages:**
   - the `plan`/`apply` model (#509)
   - fees and payers (#514)
   - authorization, covering both `is_authorized` for public signers and `ask` for private accounts (#508)
   - events (#507)
-  - a hello world with a fee-paying call (section 5 plus the runner fix)
+  - a hello world with a fee-paying call ([INTRO.md](INTRO.md) section 3, plus the runner fix)
 - **Cross-zone (#506) and the bridge (#510)** fit as separate concept or tutorial pages.
 - **#511** belongs under "run a node".
 
@@ -95,7 +95,7 @@ It also shows another funding pattern, `wallet auth-transfer send` from a genesi
 
 ## 7. The LEZ model change, v0.2.x → v0.3.0, for program authors
 
-**Before** means LEZ **v0.2.4**, the last stable release before Testnet v0.3. **After** means **v0.3.0**. The code below is from those tags in `ref-repos/logos-execution-zone`, trimmed (comments and lint attributes removed). The LEZ v0.1.2 that scaffold pins (section 3) uses the same "before" model; only the names differ (`read_nssa_inputs`, `nssa_core`).
+**Before** means LEZ **v0.2.4**, the last stable release before Testnet v0.3. **After** means **v0.3.0**. The code below is from those tags in `ref-repos/logos-execution-zone`, trimmed (comments and lint attributes removed). LEZ v0.1.2 uses the same "before" model; only the names differ (`read_nssa_inputs`, `nssa_core`).
 
 > **"Actor" in v0.3.0 refers to something else.** The release also rebuilt the sequencer internally as actors: the RpcServer, Executor and Storage actors (PRs 691, 736, 798). That is invisible to programs and clients, which still see the same RPC on `:3040`. Everything below is the program and account model, which *is* visible to programs.
 
@@ -153,7 +153,7 @@ fn apply(greeting: Vec<u8>, pre_data: &ShardData) -> Option<Vec<u8>> {
 }
 ```
 
-Effect on the runner: the v0.2.4 hello_world **claimed** the account, so the first call needed the account's signature. The v0.3.0 hello_world writes its own shard with no authorization at all, so its runner sends no signature. Since v0.3.0 needs a fee, though, a payer must still sign (section 5).
+Effect on the runner: the v0.2.4 hello_world **claimed** the account, so the first call needed the account's signature. The v0.3.0 hello_world writes its own shard with no authorization at all, so its runner sends no signature. Since v0.3.0 needs a fee, though, a payer must still sign ([INTRO.md](INTRO.md) section 3).
 
 #### B. Require the account holder's authorization
 
@@ -271,7 +271,7 @@ As a result, a program can move native funds only out of **its own PDAs** (custo
 | A new account is `Account::default()`. The program claims it with `AccountPostState::new_claimed(…, Claim::Authorized)` (needs the signature) or `Claim::Pda(seed)`, and then **owns** it | No claim step. "Uninitialised" means **this program's shard is empty** (`pre_data.is_empty()`). Writing it is just an effect, and other programs can still use the same account for their own shards |
 | `init` checks compared the whole account against default | Check the shard: return `Some(data)` only if it's empty, otherwise panic. This is how the bridge receipt gives replay protection: "Deposit was already processed" (#510) |
 
-SPEL's `#[account(init)]` (section 2) is built on the v0.2-style claim. Its v0.3 behaviour needs checking against a SPEL release that targets LEZ v0.3.
+SPEL's `#[account(init)]` is built on the v0.2-style claim. Its v0.3 behaviour needs checking against a SPEL release that targets LEZ v0.3.
 
 #### G. Call another program
 
@@ -302,7 +302,7 @@ plan.call(ChainedCall::new(
 plan.write()
 ```
 
-The **v0.2.4 tutorial warning** ("if it fails, check the hard-coded Hello World ID matches your build") no longer applies, because Docker and local builds produce different image IDs anyway (section 5). Call depth is capped at 10, and the callee runs after the caller's `plan` (depth-first).
+The **v0.2.4 tutorial warning** ("if it fails, check the hard-coded Hello World ID matches your build") no longer applies, because the callee's address now arrives in the instruction. Image IDs also differ between Docker and local builds (`lez/programs/README.md`). Call depth is capped at 10, and the callee runs after the caller's `plan` (depth-first).
 
 #### H. Depend on state owned by another program
 
@@ -358,7 +358,7 @@ The source is [`logos-co/logos-lips`](https://github.com/logos-co/logos-lips) at
 | LIP | Title (path under `docs/`) | What it covers | Relevance |
 |---|---|---|---|
 | **237** | [LEE v0.3 Specifications](https://github.com/logos-co/logos-lips/blob/master/docs/blockchain/raw/lez/lee-v0.3-specifications.md) (`blockchain/raw/lez/lee-v0.3-specifications.md`) | The whole LEE state machine: account schema, account IDs and PDAs, commitments and nullifiers, private-account encryption, **program interface and the rules checked on program outputs**, claiming, validity windows, public and private transaction formats, the privacy circuit, acceptance criteria, state transitions | **The** program-model spec, but **stale**; see 8.1 |
-| 237 (appendix) | [Built-in Programs](https://github.com/logos-co/logos-lips/blob/master/docs/blockchain/raw/lez/lee-v0.3-specifications/appendices/builtin-programs.md) | Authenticated transfer, Piñata, Token, AMM, ATA, Clock, Vault, Faucet | Stale. Compare with section 4's v0.3.0 list |
+| 237 (appendix) | [Built-in Programs](https://github.com/logos-co/logos-lips/blob/master/docs/blockchain/raw/lez/lee-v0.3-specifications/appendices/builtin-programs.md) | Authenticated transfer, Piñata, Token, AMM, ATA, Clock, Vault, Faucet | Stale. Compare with the v0.3.0 list in [INTRO.md](INTRO.md) section 5 |
 | 98 | [Mantle](https://github.com/logos-co/logos-lips/blob/master/docs/blockchain/raw/bedrock-v1.1-mantle-specification.md): `CHANNEL_INSCRIBE`, `CHANNEL_DEPOSIT`, `CHANNEL_WITHDRAW` | The Bedrock (L1) operations a zone sequencer uses: posting blocks, and deposits with a `metadata` field | The L1 half of the bridge (#510): a zone deposit is a `ChannelDeposit` whose `metadata` carries the LEZ recipient |
 | 201 | [Execution Market](https://github.com/logos-co/logos-lips/blob/master/docs/blockchain/raw/execution-market.md) (+ 190 analysis, 191 gas-cost analysis) | **Bedrock** L1 fee market: an EIP-1559-style base fee with EMA updates and a reward pool | Background only. It never mentions zones. The LEZ fee market (#514) follows the same target-based idea, but is specified only in code (`lez/programs/fee/core`) |
 | 226 (deprecated) | [Template: cross-channel messaging](https://github.com/logos-co/logos-lips/blob/master/docs/blockchain/deprecated/v1.1.0-template-cross-channel-messaging.md) | Earlier designs for channels and zones messaging each other | Historical background for cross-zone (#506). The shipped design (outbox → watcher → inbox, verified by the indexer) has no LIP |
@@ -381,7 +381,7 @@ LIP 237 says it was taken from LEZ branch `schouhy/add-specs`, `docs/specs.md`. 
 | Private authorization | "knowledge proofs of the corresponding nullifier secret key" | The separate `ask` key; without it the account can still be updated, but is unauthorized | PR 669; #508 |
 | Deployment | `ProgramDeploymentTransaction { bytecode }`; ID from image | `program_loader` header + segments in an ordinary charged public tx | `program_loader` |
 | Not covered at all | — | Fees, events, `plan.inspect`, cross-zone, bridge deposits, sequencer staking | #506, #507, #510, #511, #514 |
-| Built-ins (appendix) | Authenticated transfer, **Piñata**, Token, AMM, ATA, Clock, **Vault**, **Faucet** | Piñata removed (PR 817), Faucet removed (PR 875), Vaults deleted (#510). Added: `fee`, `bridge`, `bridge_lock`, `wrapped_token`, `cross_zone_*`, `ping_*`, `sequencer_stake`, `program_loader` | §4 |
+| Built-ins (appendix) | Authenticated transfer, **Piñata**, Token, AMM, ATA, Clock, **Vault**, **Faucet** | Piñata removed (PR 817), Faucet removed (PR 875), Vaults deleted (#510). Added: `fee`, `bridge`, `bridge_lock`, `wrapped_token`, `cross_zone_*`, `ping_*`, `sequencer_stake`, `program_loader` | [INTRO.md](INTRO.md) §5 |
 
 **Probably still useful, but check against the code first:** the parts that don't depend on the program interface. These are account-ID derivation, commitments and nullifiers, private-account kinds and encryption, view tags and discovery, and the domain-separator table. Even so, PDA derivation already differs (it now uses the program's `AccountId`), and the key hierarchy gained `ask` (#508). Treat LIP 237 as a **history** of the v0.2-style model, not a spec for writing v0.3 programs.
 
