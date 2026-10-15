@@ -1,6 +1,6 @@
 # LEZ v0.3.0: the plan/apply model and its notes
 
-> **Superseded for new work.** The v0.3.0 `plan`/`apply` program model described here has been replaced on LEZ `dev` by the actor model (PR #935, merged). To build on it, start with [INTRO.md](INTRO.md) section 4. To port a v0.2 program, use [GUIDE_v0.2_v0.4.md](GUIDE_v0.2_v0.4.md). This file stays as a record of the v0.3.0 tag and of the testnet v0.3 notes. The section numbers start at 6 because earlier sections moved out.
+> **Superseded for new work.** v0.3 is the current testnet but very short-lived, so don't build new programs on it. The v0.3.0 `plan`/`apply` program model described here has been replaced on LEZ `dev` by the actor model (PR #935, merged). To build on it, start with [INTRO.md](INTRO.md) section 4. To port a v0.2 program, use [GUIDE_v0.2_v0.4.md](GUIDE_v0.2_v0.4.md). This file stays as a record of the v0.3.0 tag and of the testnet v0.3 notes. The section numbers start at 6 because earlier sections moved out.
 
 ## 6. What the v0.3 "Journey" issues add for program authors (#506–#514)
 

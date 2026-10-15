@@ -1,12 +1,12 @@
 # LEZ programs: build and run locally
 
-How to build, deploy and call a first LEZ program from the LEZ repo itself, on each program model. **For new work, use section 4: the v0.4 actor model on the `dev` branch.** Sections 2 and 3 cover the older tags, for anyone still on the 0.2 or 0.3 networks. Everything here uses the LEZ repo directly, with Nix and `just`. It needs no Docker or Bedrock: the sequencer's `standalone` feature mocks Bedrock, and the example guests build with the local RISC Zero toolchain instead of Docker.
+How to build, deploy and call a first LEZ program from the LEZ repo itself, on each program model. **Write new programs for v0.4, the actor model, which is how programs will be written: use section 4 and the `dev` branch.** Sections 2 and 3 cover the older tags: v0.2.4 is legacy, and v0.3.0 is the current testnet but very short-lived, so don't start on it. Use section 2 to maintain an existing program or to try a deployment on a public (legacy) testnet. Everything here uses the LEZ repo directly, with Nix and `just`. It needs no Docker or Bedrock: the sequencer's `standalone` feature mocks Bedrock, and the example guests build with the local RISC Zero toolchain instead of Docker.
 
-| Version | Network | Program model | Section |
-|---|---|---|---|
-| LEZ **v0.4** (unreleased, on `dev`) | None yet (listed as TBD) | Actors handling messages | **4** |
-| LEZ **v0.3.0** | Local, and testnet 0.3 (experimental) | `plan`/`apply` on per-program shards, with fees | 3 |
-| LEZ **v0.2.4** | Local, and the legacy testnet | Programs rewrite whole accounts and claim them | 2 |
+| Version | Status | Network | Program model | Section |
+|---|---|---|---|---|
+| LEZ **v0.4** (unreleased, on `dev`) | **Recommended.** How programs will be written | None yet (listed as TBD) | Actors handling messages | **4** |
+| LEZ **v0.3.0** | Current testnet, but very short-lived. Don't start on it | Local, and testnet 0.3 (experimental) | `plan`/`apply` on per-program shards, with fees | 3 |
+| LEZ **v0.2.4** | Legacy | Local, and the legacy testnet | Programs rewrite whole accounts and claim them | 2 |
 
 Sources:
 
@@ -68,6 +68,8 @@ If the `.bin` files aren't at `$BIN`, `cargo build` prints where they are.
 ---
 
 ## 2. LEZ v0.2.4 (local and legacy testnet)
+
+> **Legacy.** Use this only to maintain an existing v0.2 program. New programs should target v0.4 (section 4), and [GUIDE_v0.2_v0.4.md](GUIDE_v0.2_v0.4.md) covers porting.
 
 This is the model the legacy testnet (the rebooted testnet 0.2) runs. There are no fees, deploying is free, and a program owns the accounts it claims.
 
@@ -147,6 +149,8 @@ $WALLET account get --account-id "Public/$ACCOUNT"   # data should hold "Hola mu
 ---
 
 ## 3. LEZ v0.3.0 (local and testnet)
+
+> **Current testnet, but very short-lived.** Don't start new work on `plan`/`apply` (don't start on 0.3): the actor model (section 4) replaces it. It is here for programs already on `plan`/`apply`. To try a public deployment, use the legacy testnet in section 2.
 
 Every user public transaction in v0.3.0 pays a fee, including deploys, and there is no faucet. The `run_hello_world` runner deploys the program itself through the program loader, so there's no separate deploy step.
 

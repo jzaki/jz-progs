@@ -2,6 +2,16 @@
 
 Notes for writing Logos Execution Zone (LEZ) programs. The target is **v0.4**, the actor model that is now merged into `dev` of [`logos-blockchain/logos-execution-zone`](https://github.com/logos-blockchain/logos-execution-zone). There is no v0.4 tag yet. Checked against `dev` at `e2913677b` (2026-10-14).
 
+## Which version?
+
+| Version | Status | What to do |
+|---|---|---|
+| **0.4**, actor model | **How programs will be written.** On `dev`, with no tag or testnet yet | Build new programs here |
+| **0.3**, `plan`/`apply` | The current testnet, but **very short-lived** | Don't start on it. For a test deployment, use 0.2 for now |
+| **0.2.4** | **Legacy** | Only for maintaining existing programs and test deployments. Port to 0.4 when available |
+
+Programs written for 0.2 or 0.3 will need porting to 0.4. The program interface differs, not just the names.
+
 ## Reading path
 
 1. **[INTRO.md](INTRO.md), section 4.** Build, deploy and call a first actor program locally on `dev`. Includes a known problem with the example runners (they send calls without a fee). Sections 2 and 3 cover the v0.2.4 and v0.3.0 tags, including deploying to their public testnets. Testnet RPCs and explorers come from `docs/get-started/testnet-endpoints.md` on `logos-docs` branch `docs/zone-endpoint-ref`. 0.4 has no testnet yet.
