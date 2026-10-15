@@ -4,14 +4,15 @@ How to build, deploy and call a first LEZ program from the LEZ repo itself, on e
 
 | Version | Network | Program model | Section |
 |---|---|---|---|
-| LEZ **v0.4** (unreleased, on `dev`) | None yet | Actors handling messages | **4** |
+| LEZ **v0.4** (unreleased, on `dev`) | None yet (listed as TBD) | Actors handling messages | **4** |
 | LEZ **v0.3.0** | Local, and testnet 0.3 (experimental) | `plan`/`apply` on per-program shards, with fees | 3 |
-| LEZ **v0.2.4** | Local, and the rebooted testnet 0.2 | Programs rewrite whole accounts and claim them | 2 |
+| LEZ **v0.2.4** | Local, and the legacy testnet | Programs rewrite whole accounts and claim them | 2 |
 
 Sources:
 
 - `logos-blockchain/logos-execution-zone` on `dev` (checked at `e2913677b`, 2026-10-14) for v0.4, and tags **v0.2.4** and **v0.3.0** for the older sections. `../logos-execution-zone` is the local checkout. Files used: `Justfile`, `flake.nix`, `rust-toolchain.toml`, `examples/program_deployment/`, `lez/wallet/`, `lez/programs/`.
 - `logos-co/logos-docs` [Journey] issues #506–#511 and #514, the LEZ developers' notes for testnet v0.3. Issue numbers like `#514` refer to these, and LEZ PRs are written "PR 875".
+- `logos-co/logos-docs` branch `docs/zone-endpoint-ref`, file `docs/get-started/testnet-endpoints.md` (commit `de03a2b0`, unmerged at the time of writing, so it may move): the RPC, explorer, release and channel for each testnet. Section 1 copies the rows used here. If they differ, that page wins.
 - The actor-model manual on LEZ branch `schouhy/lez-guide-mdbook` (`docs/actor-program-development-book/`). Section 4 links to it instead of repeating it.
 
 **What is referenced.** The v0.4 steps are written from the code and its `--help` text. [MODEL_CHANGES.md](MODEL_CHANGES.md) explains the v0.3.0 model in detail, and [GUIDE_v0.2_v0.4.md](GUIDE_v0.2_v0.4.md) covers porting from v0.2 to v0.4.
@@ -37,6 +38,22 @@ Run every command below inside `nix develop`, from the repo root unless a step s
 > export LIBCLANG_PATH=$(nix eval --raw .#packages.x86_64-linux.wallet.LIBCLANG_PATH)
 > ```
 
+### Testnets
+
+Each LEZ version has its own public testnet. Build the wallet and the guests from the **ref that matches the testnet**, never from `dev`, because a wallet and a chain must speak the same transaction format.
+
+| Testnet | LEZ RPC | LEZ explorer | Build from |
+|---|---|---|---|
+| 0.4 (actor model) | TBD | TBD | TBD |
+| 0.3 (current) | `https://testnet.lez.logos.co` | `https://explorer.testnet.lez.logos.co/` | tag `v0.3.0` |
+| 0.2.4 (legacy) | `https://testnet-legacy.lez.logos.co/` | `https://explorer.testnet-legacy.lez.logos.co/` | tag `v0.2.4-lez-legacy` |
+
+Both also appear on the Logos Blockchain explorer, `https://testnet.blockchain.logos.co/web/explorer/`. The channel ids are on the endpoints page (`logos-docs`, branch `docs/zone-endpoint-ref`, `docs/get-started/testnet-endpoints.md`).
+
+- **`change-network testnet` always means the 0.3 RPC.** The alias is hard-coded in `lez/wallet/src/cli/network.rs`, and it is the same at `v0.2.4`, `v0.3.0` and `dev`. For the legacy testnet, pass the URL: `wallet change-network https://testnet-legacy.lez.logos.co/`. `change-network` accepts `testnet`, `local` or any sequencer URL.
+- **`v0.2.4-lez-legacy` is not `v0.2.4`.** It is three commits ahead: built against logos-blockchain 0.3.1, plus a sequencer fix for stale pending inscriptions. Use the legacy tag for the legacy testnet.
+- **Keep one wallet home per network.** The wallet keeps its config and `storage.json` in `LEE_WALLET_HOME_DIR`. Reusing one home across networks mixes accounts and nonces from different chains. Copy `lez/wallet/configs/debug` to a new directory for each testnet, and export that path as `LEE_WALLET_HOME_DIR` in every terminal (the `run_*` runners read the same wallet). `just run-wallet` always sets the variable to `configs/debug` itself, so for a testnet either call `cargo run --release -p wallet --` directly, or accept that `configs/debug` is your home and reset it with `just clean` afterwards.
+
 All versions build the example guests the same way:
 
 ```bash
@@ -50,9 +67,9 @@ If the `.bin` files aren't at `$BIN`, `cargo build` prints where they are.
 
 ---
 
-## 2. LEZ v0.2.4 (local)
+## 2. LEZ v0.2.4 (local and legacy testnet)
 
-This is the model the rebooted testnet 0.2 runs. There are no fees, deploying is free, and a program owns the accounts it claims.
+This is the model the legacy testnet (the rebooted testnet 0.2) runs. There are no fees, deploying is free, and a program owns the accounts it claims.
 
 ```bash
 # Terminal 1: local sequencer on 127.0.0.1:3040. Dev mode skips proving.
@@ -99,6 +116,33 @@ Every file in the guest's `src/bin/` becomes a program, and every file in the ru
      cargo run --release --bin run_my_program -- "$BIN/my_program.bin" "$ACCOUNT")
    just run-wallet account get --account-id "Public/$ACCOUNT"
    ```
+
+### Testnet (legacy, v0.2.4)
+
+The legacy testnet runs the 0.2.4 model: no fees, free deploys, and a program owns the accounts it claims. Run this from a checkout of tag `v0.2.4-lez-legacy`. The wallet and guest build steps are section 1's.
+
+```bash
+export LEE_WALLET_HOME_DIR=$HOME/lez-wallet-legacy      # a copy of lez/wallet/configs/debug (see section 1, Testnets)
+WALLET="cargo run --release -p wallet --"
+$WALLET change-network https://testnet-legacy.lez.logos.co/   # not the `testnet` alias, which is the 0.3 chain
+$WALLET check-health                      # asks for a password the first time
+$WALLET account new public                # the account the program claims
+ACCOUNT=<account id printed above>
+
+# Build the guests (section 1), then deploy and call
+$WALLET deploy-program "$BIN/hello_world_with_authorization.bin"
+(cd examples/program_deployment && \
+  cargo run --release --bin run_hello_world_with_authorization -- \
+  "$BIN/hello_world_with_authorization.bin" "$ACCOUNT")
+
+# Check the result
+$WALLET account get --account-id "Public/$ACCOUNT"   # data should hold "Hola mundo!"
+```
+
+- **Check it landed.** Look the account up in the legacy explorer, `https://explorer.testnet-legacy.lez.logos.co/`. Public testnets have other users, so the block may take a few seconds to appear.
+- **No payer, and no genesis test keys.** v0.2.4 has no fees, so neither the deploy nor the call needs a funded account. Do not use `just wallet-import-test-accounts`: its keys are public, and they belong to the local chain.
+- **Funding.** The v0.2.4 wallet has `wallet pinata claim --to <account>`, which I haven't tried on the legacy testnet. If you need a balance for a program that moves native tokens, check the testnet's faucet instructions in the Logos docs first.
+- **Switch back.** Point the wallet home elsewhere or run `change-network local` before running a local sequencer again.
 
 ---
 
@@ -166,29 +210,33 @@ fn apply(greeting: Vec<u8>, pre_data: &ShardData) -> Option<Vec<u8>> {
 
 ### Testnet
 
-The public testnet replaces the local sequencer. You still build the guests and the wallet locally.
+The 0.3 testnet replaces the local sequencer: RPC `https://testnet.lez.logos.co`, explorer `https://explorer.testnet.lez.logos.co/`. You still build the guests and the wallet locally, from tag `v0.3.0` (section 1, Testnets).
 
 ```bash
-just run-wallet change-network testnet   # https://testnet.lez.logos.co
-export LEE_WALLET_HOME_DIR=$PWD/lez/wallet/configs/debug
-just run-wallet account new public       # the account hello_world writes to
+export LEE_WALLET_HOME_DIR=$HOME/lez-wallet-v03          # a copy of lez/wallet/configs/debug
+WALLET="cargo run --release -p wallet --"
+$WALLET change-network testnet           # https://testnet.lez.logos.co
+$WALLET check-health                     # asks for a password the first time
+$WALLET account new public               # the account hello_world writes to
 ACCOUNT=<account id printed above>
-PAYER=<your funded testnet account id>
+PAYER=<your funded testnet account id>   # must already be in this wallet
 (cd examples/program_deployment && \
   cargo run --release --bin run_hello_world -- "$BIN/hello_world.bin" "$ACCOUNT" "$PAYER")
-just run-wallet change-network local     # switch back before running locally again
+$WALLET account get --raw --scope all --account-id "Public/$ACCOUNT"   # shard hex; echo <hex> | xxd -r -p -> Hola mundo!
 ```
 
-- **The payer must be a real funded account.** Funds only enter a zone through an L1 bridge deposit (#510), and there's no first-party command for making one. In practice, ask someone with testnet funds to transfer to you.
+- **The payer must be a real funded account that this wallet holds the key for.** Funds only enter a zone through an L1 bridge deposit (#510), and there's no first-party command for making one. In practice, ask someone with testnet funds to transfer to you, then import or receive it into the wallet.
 - **It needs the full reserve for each transaction,** about 16,003,000 at the default gas limit and genesis base fees (#514). Most of it is refunded.
-- **The call fee bug above applies here too.** Fix the runner before calling.
-- **Deploying without the runner:** `just run-wallet program-loader deploy --elf <bin> --header <account> --segments <account>... --payer Public/<id>`. Use one fresh public account for the header, plus one per 96 KiB of ELF for the segments. The header's account ID becomes the program's address.
+- **The call fee bug above applies here too.** Fix the runner before calling, or the call is rejected and the shard stays empty.
+- **Check it landed.** Search for the account or the transaction in `https://explorer.testnet.lez.logos.co/`. A call that reverts is still included and charged, so an included transaction with an empty shard means a failure, not a missing block.
+- **Deploying without the runner:** `$WALLET program-loader deploy --elf <bin> --header <account> --segments <account>... --payer Public/<id>`. Use one fresh public account for the header, plus one per 96 KiB of ELF for the segments. The header's account ID becomes the program's address.
+- **Switch back.** Run `change-network local` (or use a different wallet home) before running a local sequencer again.
 
 ---
 
 ## 4. LEZ v0.4: the actor model on `dev` (local)
 
-> **Not released.** There is no v0.4 tag or network yet. This is the actor model that PR #935 merged into LEZ `dev`, checked at `e2913677b`. Build against `dev` and expect names to move. The steps below follow the code and have **not been run**.
+> **Not released.** There is no v0.4 tag or testnet yet. The endpoints page lists 0.4 as TBD, so local is the only option for now. This is the actor model that PR #935 merged into LEZ `dev`, checked at `e2913677b`. Build against `dev` and expect names to move. The steps below follow the code and have **not been run**.
 
 **The idea.** A program no longer rewrites accounts or plans effects. It is a handler that receives **one message** addressed to **one actor**, and an actor is one program's state on one account. The handler sees only that state, and returns the new state plus any messages it wants to send to other actors.
 
