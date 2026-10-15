@@ -1,3 +1,6 @@
+# LEZ v0.3.0: the plan/apply model and its notes
+
+> **Superseded for new work.** The v0.3.0 `plan`/`apply` program model described here has been replaced on LEZ `dev` by the actor model (PR #935, merged). To build on it, start with [INTRO.md](INTRO.md) section 4. To port a v0.2 program, use [GUIDE_v0.2_v0.4.md](GUIDE_v0.2_v0.4.md). This file stays as a record of the v0.3.0 tag and of the testnet v0.3 notes. The section numbers start at 6 because earlier sections moved out.
 
 ## 6. What the v0.3 "Journey" issues add for program authors (#506–#514)
 
@@ -95,9 +98,9 @@ It also shows another funding pattern, `wallet auth-transfer send` from a genesi
 
 ## 7. The LEZ model change, v0.2.x → v0.3.0, for program authors
 
-**Before** means LEZ **v0.2.4**, the last stable release before Testnet v0.3. **After** means **v0.3.0**. The code below is from those tags in `ref-repos/logos-execution-zone`, trimmed (comments and lint attributes removed). LEZ v0.1.2 uses the same "before" model; only the names differ (`read_nssa_inputs`, `nssa_core`).
+**Before** means LEZ **v0.2.4**, the last stable release before Testnet v0.3. **After** means **v0.3.0**. The code below is from those tags in the local LEZ checkout (`../logos-execution-zone`), trimmed (comments and lint attributes removed). LEZ v0.1.2 uses the same "before" model; only the names differ (`read_nssa_inputs`, `nssa_core`).
 
-> **"Actor" in v0.3.0 refers to something else.** The release also rebuilt the sequencer internally as actors: the RpcServer, Executor and Storage actors (PRs 691, 736, 798). That is invisible to programs and clients, which still see the same RPC on `:3040`. Everything below is the program and account model, which *is* visible to programs.
+> **"Actor" in v0.3.0 refers to something else.** The release rebuilt the sequencer internally as actors: the RpcServer, Executor and Storage actors (PRs 691, 736, 798). That is invisible to programs and clients, which still see the same RPC on `:3040`. It is unrelated to the **actor program model** that later landed on `dev` (see the note at the top of this file). Everything below is the v0.3.0 program and account model.
 
 ### 7.1 What changed underneath
 
