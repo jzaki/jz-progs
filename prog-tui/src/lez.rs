@@ -72,6 +72,17 @@ impl Lez {
         names
     }
 
+    /// The execution gas limit the wallet declares on every transaction: `gas_limit` in
+    /// `wallet_config.json`, or the wallet's `DEFAULT_GAS_LIMIT`.
+    pub fn wallet_gas_limit(&self) -> u64 {
+        const DEFAULT_GAS_LIMIT: u64 = 2_000_000;
+        fs::read_to_string(self.wallet_home().join("wallet_config.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|config| config["gas_limit"].as_u64())
+            .unwrap_or(DEFAULT_GAS_LIMIT)
+    }
+
     /// The wallet's `sequencer.sequencer_addr`, which is where the sequencer listens.
     pub fn sequencer_url(&self) -> String {
         fs::read_to_string(self.wallet_home().join("wallet_config.json"))

@@ -487,7 +487,7 @@ fn draw_checklist(frame: &mut Frame, area: Rect, app: &App) {
 
 fn draw_keys(frame: &mut Frame, area: Rect, app: &App) {
     let context = match app.focus {
-        Focus::Accounts => "P payer · A account · n new",
+        Focus::Accounts => "P payer · A account · n new · t transfer",
         Focus::Guests => "d deploy · r stock runner",
         Focus::Deployments => "c call · m move-data · x forget",
         Focus::Builtin => "read-only: details in the middle pane",
@@ -510,6 +510,7 @@ fn draw_help(frame: &mut Frame) {
         ("i", "initialise the wallet and import the two funded test accounts"),
         ("n", "new public account"),
         ("P / A", "make the selected account PAYER / ACCOUNT"),
+        ("t", "native token transfer (wallet auth-transfer send), checked by both balances"),
         ("d", "deploy the selected guest with prog_cli (Guests pane)"),
         ("r", "run the guest's stock run_* runner: deploys again and calls once"),
         ("c", "call the selected deployment (Deployed pane)"),

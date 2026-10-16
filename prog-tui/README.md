@@ -43,6 +43,7 @@ Everything else the walkthrough needs must already be installed: the RISC Zero t
 | `i` | Initialise the wallet and import the two funded test accounts |
 | `n` | New public account, with an optional label |
 | `P` / `A` | Make the selected account `PAYER` / `ACCOUNT` |
+| `t` | Native token transfer. Prefilled from `PAYER` to the selected account (or `ACCOUNT`) |
 | `d` | Deploy the selected guest with `prog_cli` (Guests pane) |
 | `r` | Run the selected guest's stock `run_*` runner. It deploys again, so the programs it deploys are registered by name, and the TUI waits a block for the runner's last call to land before starting another job |
 | `c` | Call the selected deployment (Deployed pane). The form is prefilled; Enter sends |
@@ -64,6 +65,15 @@ Everything else the walkthrough needs must already be installed: the RISC Zero t
 | `tail_call_with_pda` | `pda` | The callee is prefilled with the latest `hello_world_with_authorization` |
 
 **Every call is checked.** `prog_cli` waits for the transaction to be included, then reads the target state back. A call that leaves it unchanged was reverted (it is still included and charged). When that happens, the log shows the reason, taken from the sequencer's log: a guest panic, or an engine error such as `UnadmittedPublicActor`. This only works for a sequencer prog-tui started.
+
+## Native transfers
+
+`t` runs `wallet auth-transfer send --from … --to … --amount …`. The sender signs and pays the fee (about 4,000 on the dev chain).
+
+- **Checked by balances:** the wallet says "included in block" even when a transfer reverts. So prog-tui reads both balances before and after, and gives the credit up to a minute to land, because it's an asynchronous message.
+  - When it lands, the log says `✓ moved 1000 … (fee …)`.
+  - When nothing is credited, it says the transfer reverted, and shows the reason from the sequencer's log.
+- **Refused before sending:** a sender outside the wallet; a sender holding less than the amount plus the fee reserve, which the sequencer checks at submission (the execution gas limit × the base fee, plus the bytes × the storage fee: about 16 million at the wallet's default gas limit, so a freshly funded account needs more than that); and a recipient that isn't on chain and isn't in the wallet. The wallet can only vouch for an unused account it holds the key for; any other unused account needs `wallet auth-transfer send --to-pk <its public key>`, from the shell.
 
 ## The sequencer
 

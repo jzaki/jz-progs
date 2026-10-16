@@ -478,23 +478,182 @@ pub async fn call(ctx: &mut Ctx, payer: &str, args: &[String]) -> anyhow::Result
         ));
     }
     if !output.ok {
-        if managed {
-            // Give the sequencer a moment to flush the block's log lines.
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let log = sequencer::read_log_from(&ctx.state_dir, log_offset, 256 * 1024);
-            let reasons = sequencer::revert_reasons(&log);
-            if reasons.is_empty() {
-                ctx.log("no revert reason found in the sequencer log");
-            }
-            for reason in reasons {
-                ctx.log(format!("sequencer: {reason}"));
-            }
-        } else {
-            ctx.log("the revert reason is in the external sequencer's own log");
-        }
+        report_revert(ctx, log_offset, managed).await;
         bail!("the call didn't change the target state");
     }
     Ok(state)
+}
+
+/// Logs why a transaction reverted: the sequencer log lines written since `log_offset`. Only a
+/// sequencer prog-tui started writes to a log it can read.
+async fn report_revert(ctx: &mut Ctx, log_offset: u64, managed: bool) {
+    if !managed {
+        ctx.log("the revert reason is in the external sequencer's own log");
+        return;
+    }
+    // Give the sequencer a moment to flush the block's log lines.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let log = sequencer::read_log_from(&ctx.state_dir, log_offset, 256 * 1024);
+    let reasons = sequencer::revert_reasons(&log);
+    if reasons.is_empty() {
+        ctx.log("no revert reason found in the sequencer log");
+    }
+    for reason in reasons {
+        ctx.log(format!("sequencer: {reason}"));
+    }
+}
+
+// ---- Native token transfers ----
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferOutcome {
+    /// The recipient got `amount`; the sender also paid `fee`.
+    Moved { fee: u128 },
+    /// Included and charged, but nothing was credited.
+    Reverted { fee: u128 },
+    /// Neither balance changed.
+    Unchanged,
+}
+
+/// What a transfer did, judged from both balances before and after. The wallet says "included in
+/// block" even when a transfer reverts, so this is the only way to tell.
+pub fn transfer_outcome(
+    sender: (u128, u128),
+    recipient: (u128, u128),
+    amount: u128,
+) -> TransferOutcome {
+    let (sender_before, sender_after) = sender;
+    let (recipient_before, recipient_after) = recipient;
+    let spent = sender_before.saturating_sub(sender_after);
+    if recipient_after == recipient_before.saturating_add(amount) {
+        TransferOutcome::Moved {
+            fee: spent.saturating_sub(amount),
+        }
+    } else if spent > 0 {
+        TransferOutcome::Reverted { fee: spent }
+    } else {
+        TransferOutcome::Unchanged
+    }
+}
+
+/// A native transfer's serialized size, rounded up: 511 bytes measured, 544 when it also admits a
+/// new recipient.
+const TRANSFER_BYTES_ESTIMATE: u128 = 600;
+
+/// The fee reserve the sequencer checks the payer for at submission (`fee_reserve` in
+/// `lez/programs/fee/core/src/assess.rs`): `gas_limit·base_fee_exec + bytes·base_fee_stor + tip`,
+/// with the wallet's tip of 0 and the byte count estimated.
+pub fn fee_reserve_estimate(gas_limit: u64, base_fee_exec: u64, base_fee_stor: u64) -> u128 {
+    u128::from(gas_limit) * u128::from(base_fee_exec)
+        + TRANSFER_BYTES_ESTIMATE * u128::from(base_fee_stor)
+}
+
+async fn balance(rpc: &Rpc, id: &str) -> anyhow::Result<Option<u128>> {
+    Ok(rpc.account(id).await?.map(|view| view.balance()))
+}
+
+/// Sends `amount` of the native token with `wallet auth-transfer send`, then checks both balances.
+pub async fn transfer(ctx: &mut Ctx, from: &str, to: &str, amount: u128) -> anyhow::Result<()> {
+    if from == to {
+        bail!("from and to are the same account");
+    }
+    let accounts = list_accounts(&ctx.lez).await?;
+    let in_wallet = |id: &str| accounts.iter().any(|a| a.public && a.id == id);
+    if !in_wallet(from) {
+        bail!("{} isn't a public account in this wallet, so it can't sign", short(from));
+    }
+    let sender_before = balance(&ctx.rpc, from).await?.unwrap_or(0);
+    // The sender pays the fee, and the sequencer rejects a transaction whose payer can't cover
+    // the fee reserve ("Incorrect fee"). The reserve is held before execution, so the amount
+    // has to come on top of it.
+    let (base_fee_exec, base_fee_stor) = ctx
+        .rpc
+        .base_fees()
+        .await
+        .ok_or_else(|| anyhow!("couldn't read the fee state (getFeeState)"))?;
+    let reserve = fee_reserve_estimate(ctx.lez.wallet_gas_limit(), base_fee_exec, base_fee_stor);
+    if sender_before < amount.saturating_add(reserve) {
+        bail!(
+            "{} holds {sender_before}; sending {amount} needs about {} ({amount} plus ~{reserve} \
+             held for the fee, which the sender pays). Fund it first, e.g. from PAYER",
+            short(from),
+            amount.saturating_add(reserve)
+        );
+    }
+    let recipient_before = balance(&ctx.rpc, to).await?;
+    if recipient_before.is_none() && !in_wallet(to) {
+        // The engine only runs an actor on an account that is on chain, signs, or comes with
+        // evidence; the wallet can only give evidence for accounts it holds keys for.
+        bail!(
+            "{} isn't on chain and isn't in this wallet: an unused account needs its public key \
+             (`wallet auth-transfer send --to-pk <pk>`)",
+            short(to)
+        );
+    }
+    let recipient_before = recipient_before.unwrap_or(0);
+
+    let log_offset = sequencer::log_len(&ctx.state_dir);
+    let managed = sequencer::managed_pgid(&ctx.state_dir).is_some();
+    let amount_text = amount.to_string();
+    let command = ctx.wallet(&[
+        "auth-transfer",
+        "send",
+        "--from",
+        &format!("Public/{from}"),
+        "--to",
+        &format!("Public/{to}"),
+        "--amount",
+        &amount_text,
+    ]);
+    ctx.run_ok(
+        &format!("wallet auth-transfer send {amount} {} → {}", short(from), short(to)),
+        command,
+        None,
+    )
+    .await?;
+
+    // The credit is an async message: give it up to a minute to land.
+    let deadline = Instant::now() + Duration::from_mins(1);
+    let (sender_after, recipient_after) = loop {
+        let sender_after = balance(&ctx.rpc, from).await?.unwrap_or(0);
+        let recipient_after = balance(&ctx.rpc, to).await?.unwrap_or(0);
+        if recipient_after != recipient_before || Instant::now() > deadline {
+            break (sender_after, recipient_after);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    };
+    match transfer_outcome(
+        (sender_before, sender_after),
+        (recipient_before, recipient_after),
+        amount,
+    ) {
+        TransferOutcome::Moved { fee } => {
+            ctx.log(format!(
+                "✓ moved {amount} from {} to {} (fee {fee}); {} now holds {recipient_after}",
+                short(from),
+                short(to),
+                short(to)
+            ));
+            Ok(())
+        }
+        TransferOutcome::Reverted { fee } => {
+            ctx.log(format!("✗ reverted: nothing credited, fee {fee} charged"));
+            report_revert(ctx, log_offset, managed).await;
+            bail!("the transfer reverted")
+        }
+        TransferOutcome::Unchanged => bail!("neither balance changed within a minute"),
+    }
+}
+
+/// An account id as typed: trimmed, with an optional `Public/` prefix removed.
+pub fn bare_account_id(text: &str) -> &str {
+    let text = text.trim();
+    text.strip_prefix("Public/").unwrap_or(text)
+}
+
+/// A positive whole amount.
+pub fn parse_amount(text: &str) -> Option<u128> {
+    text.trim().parse().ok().filter(|amount| *amount > 0)
 }
 
 /// The guests a runner deploys, in deploy order: the `.bin` arguments' names. The tail-call
@@ -661,6 +820,41 @@ fn check_greeting(state: &[u8], greeting: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifies_transfer_outcomes() {
+        // The values from a real transfer of 1000: the sender lost 5088.
+        assert_eq!(
+            transfer_outcome((19_999_986_297_496, 19_999_986_292_408), (0, 1000), 1000),
+            TransferOutcome::Moved { fee: 4088 }
+        );
+        assert_eq!(
+            transfer_outcome((10_000, 5_912), (7, 7), 1000),
+            TransferOutcome::Reverted { fee: 4088 }
+        );
+        assert_eq!(
+            transfer_outcome((10_000, 10_000), (7, 7), 1000),
+            TransferOutcome::Unchanged
+        );
+    }
+
+    #[test]
+    fn estimates_the_fee_reserve() {
+        // The dev chain's opening state: both base fees 8, the wallet's default gas limit.
+        assert_eq!(fee_reserve_estimate(2_000_000, 8, 8), 16_004_800);
+        assert_eq!(fee_reserve_estimate(0, 8, 8), 4_800);
+    }
+
+    #[test]
+    fn parses_transfer_inputs() {
+        assert_eq!(bare_account_id(" Public/2RHZ "), "2RHZ");
+        assert_eq!(bare_account_id("2RHZ"), "2RHZ");
+        assert_eq!(parse_amount("1000"), Some(1000));
+        assert_eq!(parse_amount(" 7 "), Some(7));
+        assert_eq!(parse_amount("0"), None);
+        assert_eq!(parse_amount("-5"), None);
+        assert_eq!(parse_amount("ten"), None);
+    }
 
     #[test]
     fn runner_guests_are_the_bin_arguments_in_order() {

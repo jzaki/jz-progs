@@ -129,6 +129,15 @@ impl Rpc {
         self.call("checkHealth", json!([])).await.is_ok()
     }
 
+    /// The current base fees, `(execution, storage)`, from `getFeeState`.
+    pub async fn base_fees(&self) -> Option<(u64, u64)> {
+        let state = self.call("getFeeState", json!([])).await.ok()?;
+        Some((
+            state["base_fee_exec"].as_u64()?,
+            state["base_fee_stor"].as_u64()?,
+        ))
+    }
+
     pub async fn last_block(&self) -> Option<u64> {
         self.call("getLastBlockId", json!([])).await.ok()?.as_u64()
     }

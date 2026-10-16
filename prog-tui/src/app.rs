@@ -56,6 +56,8 @@ impl Form {
 
 pub enum FormAction {
     NewAccount,
+    /// `wallet auth-transfer send`: fields `from`, `to`, `amount`.
+    Transfer,
     LezDir,
     /// `prog_cli <subcommand> --<label> <value>… <extra>…`
     Call {
@@ -551,6 +553,7 @@ impl App {
                     FormAction::NewAccount,
                 ));
             }
+            KeyCode::Char('t') => self.open_transfer(),
             KeyCode::Char('P') => self.set_role(true),
             KeyCode::Char('A') => self.set_role(false),
             KeyCode::Char('d') => self.deploy_selected(),
@@ -646,6 +649,29 @@ impl App {
         *slot = Some(account.id.clone());
         self.push_log(format!("{role}={}", account.id));
         self.save();
+    }
+
+    /// The transfer form: from `PAYER`, to the selected account (when the Accounts pane has
+    /// focus and it isn't the payer) or else `ACCOUNT`.
+    fn open_transfer(&mut self) {
+        let payer = self.saved.payer.clone().unwrap_or_default();
+        let selected = (self.focus == Focus::Accounts)
+            .then(|| self.selected_account())
+            .flatten()
+            .filter(|account| account.public && account.id != payer)
+            .map(|account| account.id.clone());
+        let to = selected
+            .or_else(|| self.saved.account.clone())
+            .unwrap_or_default();
+        self.modal = Modal::Form(Form::new(
+            "Native token transfer → wallet auth-transfer send".to_owned(),
+            vec![
+                ("from".to_owned(), payer),
+                ("to".to_owned(), to),
+                ("amount".to_owned(), "1000".to_owned()),
+            ],
+            FormAction::Transfer,
+        ));
     }
 
     fn deploy_selected(&mut self) {
@@ -788,6 +814,21 @@ impl App {
                     let id = jobs::new_account(&mut ctx, &label).await?;
                     ctx.log(format!("new account {id}"));
                     Ok(())
+                });
+            }
+            FormAction::Transfer => {
+                let from = jobs::bare_account_id(&values[0]).to_owned();
+                let to = jobs::bare_account_id(&values[1]).to_owned();
+                if from.is_empty() || to.is_empty() {
+                    self.push_log("✗ from and to are both needed".to_owned());
+                    return;
+                }
+                let Some(amount) = jobs::parse_amount(&values[2]) else {
+                    self.push_log(format!("✗ amount must be a whole number above 0, not {:?}", values[2]));
+                    return;
+                };
+                self.spawn_job("transfer", move |mut ctx| async move {
+                    jobs::transfer(&mut ctx, &from, &to, amount).await
                 });
             }
             FormAction::LezDir => {
