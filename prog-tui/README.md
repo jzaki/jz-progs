@@ -44,7 +44,7 @@ Everything else the walkthrough needs must already be installed: the RISC Zero t
 | `n` | New public account, with an optional label |
 | `P` / `A` | Make the selected account `PAYER` / `ACCOUNT` |
 | `d` | Deploy the selected guest with `prog_cli` (Guests pane) |
-| `r` | Run the selected guest's stock `run_*` runner |
+| `r` | Run the selected guest's stock `run_*` runner. It deploys again, so the programs it deploys are registered by name, and the TUI waits a block for the runner's last call to land before starting another job |
 | `c` | Call the selected deployment (Deployed pane). The form is prefilled; Enter sends |
 | `m` | `move-data`, for `hello_world_with_move_function` |
 | `x` | Forget the selected deployment |

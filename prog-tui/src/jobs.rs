@@ -7,7 +7,7 @@ use std::{
     ffi::OsStr,
     fs,
     io::Write as _,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -24,7 +24,10 @@ use crate::{
     rpc::{AccountView, Rpc, describe_bytes, unhex},
     sequencer::{self, SeqStatus, StopTarget},
     state::Deployment,
-    wallet::{WalletAccount, is_noise, parse_account_list, parse_new_account, parse_prog_cli},
+    wallet::{
+        WalletAccount, is_noise, parse_account_list, parse_new_account, parse_prog_cli,
+        parse_program_ids,
+    },
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -494,13 +497,61 @@ pub async fn call(ctx: &mut Ctx, payer: &str, args: &[String]) -> anyhow::Result
     Ok(state)
 }
 
+/// The guests a runner deploys, in deploy order: the `.bin` arguments' names. The tail-call
+/// runners take the caller's `.bin` first and deploy it first.
+fn runner_guests(args: &[String]) -> Vec<String> {
+    args.iter()
+        .filter_map(|arg| Path::new(arg).file_name()?.to_str()?.strip_suffix(".bin"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Runs a stock `run_*` runner, and registers the programs it deployed (it prints their ids).
 pub async fn runner(ctx: &mut Ctx, args: &[String]) -> anyhow::Result<()> {
     let (name, rest) = args.split_first().ok_or_else(|| anyhow!("no runner"))?;
     let mut command = ctx.command(ctx.lez.release_bin(name));
     command.args(rest);
-    ctx.run_ok(&args.join(" "), command, None).await?;
+    let output = ctx.run_ok(&args.join(" "), command, None).await?;
+
+    let guests = runner_guests(rest);
+    let ids = parse_program_ids(&output);
+    if guests.len() == ids.len() {
+        for (guest, program_id) in guests.into_iter().zip(ids) {
+            ctx.log(format!("deployed {guest} → {program_id}"));
+            ctx.send(Msg::Deployed(Deployment {
+                name: guest,
+                program_id,
+                stale: false,
+            }));
+        }
+    } else {
+        ctx.log(format!(
+            "the runner printed {} program id(s) for {} guest(s): not registering them. Rebuild (key b) if the runner is older than prog_cli",
+            ids.len(),
+            guests.len()
+        ));
+    }
+    wait_for_next_block(ctx).await;
     ctx.log("the runner doesn't check its call: look at the account's actor states");
     Ok(())
+}
+
+/// The stock runners send their last call and exit without waiting for it. A job that started
+/// right after would read the payer's nonce before that call lands, and its first transaction
+/// would fail with `Nonce mismatch`. Everything sent before now is in the next block.
+async fn wait_for_next_block(ctx: &mut Ctx) {
+    let Some(start) = ctx.rpc.last_block().await else {
+        return;
+    };
+    ctx.log("waiting for the runner's last call to be included…");
+    let deadline = Instant::now() + Duration::from_mins(1);
+    while Instant::now() < deadline {
+        if ctx.rpc.last_block().await.is_some_and(|block| block > start) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    ctx.log("no new block within a minute: wait before the next job");
 }
 
 pub fn short(id: &str) -> String {
@@ -604,5 +655,28 @@ fn check_greeting(state: &[u8], greeting: &str) -> anyhow::Result<()> {
             "expected {greeting:?}, found {}",
             describe_bytes(state)
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runner_guests_are_the_bin_arguments_in_order() {
+        let args: Vec<String> = [
+            "/lez/target/x/release/simple_tail_call.bin",
+            "/lez/target/x/release/hello_world.bin",
+            "8Ue4RiqZ",
+            "2RHZhw9h",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        assert_eq!(runner_guests(&args), ["simple_tail_call", "hello_world"]);
+        assert_eq!(
+            runner_guests(&["/x/hello_world.bin".to_owned(), "ACC".to_owned()]),
+            ["hello_world"]
+        );
+        assert!(runner_guests(&["ACC".to_owned()]).is_empty());
     }
 }
