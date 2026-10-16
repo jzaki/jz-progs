@@ -9,6 +9,7 @@ mod rpc;
 mod sequencer;
 mod state;
 mod ui;
+mod userprogs;
 mod wallet;
 
 use std::time::{Duration, Instant};

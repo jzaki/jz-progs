@@ -17,6 +17,7 @@ use crate::{
     rpc::{AccountView, Rpc},
     sequencer::{self, StopTarget},
     state::{self, Deployment, Saved},
+    userprogs,
     wallet::WalletAccount,
 };
 
@@ -58,6 +59,8 @@ pub enum FormAction {
     NewAccount,
     /// `wallet auth-transfer send`: fields `from`, `to`, `amount`.
     Transfer,
+    /// Build and deploy a guest source file: field `file`.
+    BuildDeploy,
     LezDir,
     /// `prog_cli <subcommand> --<label> <value>… <extra>…`
     Call {
@@ -554,6 +557,13 @@ impl App {
                 ));
             }
             KeyCode::Char('t') => self.open_transfer(),
+            KeyCode::Char('u') => {
+                self.modal = Modal::Form(Form::new(
+                    "Build and deploy a guest (path relative to jz-progs/example_progs)".to_owned(),
+                    vec![("file".to_owned(), "hello_world.rs".to_owned())],
+                    FormAction::BuildDeploy,
+                ));
+            }
             KeyCode::Char('P') => self.set_role(true),
             KeyCode::Char('A') => self.set_role(false),
             KeyCode::Char('d') => self.deploy_selected(),
@@ -816,6 +826,26 @@ impl App {
                     Ok(())
                 });
             }
+            FormAction::BuildDeploy => {
+                let file = userprogs::resolve(&values[0]);
+                if let Err(error) = userprogs::guest_name(&file) {
+                    self.push_log(format!("✗ {error}"));
+                    return;
+                }
+                if !self.prog_cli_ready() {
+                    return;
+                }
+                let Some(payer) = self.need("PAYER (key P)", self.saved.payer.clone().as_ref()) else {
+                    return;
+                };
+                let label = format!(
+                    "build+deploy {}",
+                    file.file_name().and_then(|n| n.to_str()).unwrap_or("?")
+                );
+                self.spawn_job(&label, move |mut ctx| async move {
+                    jobs::build_and_deploy(&mut ctx, &file, &payer).await
+                });
+            }
             FormAction::Transfer => {
                 let from = jobs::bare_account_id(&values[0]).to_owned();
                 let to = jobs::bare_account_id(&values[1]).to_owned();
@@ -893,7 +923,12 @@ fn call_form(saved: &Saved, deployment: &Deployment, alternate: bool) -> Option<
             .unwrap_or_default()
     };
     let field = |label: &str, value: String| (label.to_owned(), value);
-    let (subcommand, fields, extra) = match (deployment.name.as_str(), alternate) {
+    // A copy of an example in example_progs (`jz_hello_world`) takes the example's message.
+    let name = deployment
+        .name
+        .strip_prefix(userprogs::PREFIX)
+        .unwrap_or(&deployment.name);
+    let (subcommand, fields, extra) = match (name, alternate) {
         ("hello_world", false) => (
             "hello",
             vec![
@@ -961,4 +996,29 @@ fn call_form(saved: &Saved, deployment: &Deployment, alternate: bool) -> Option<
             extra,
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn subcommand_for(name: &str) -> Option<String> {
+        let deployment = Deployment {
+            name: name.to_owned(),
+            program_id: "PROG".to_owned(),
+            stale: false,
+        };
+        match call_form(&Saved::default(), &deployment, false)?.action {
+            FormAction::Call { subcommand, .. } => Some(subcommand),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn an_example_progs_copy_gets_the_examples_call_form() {
+        assert_eq!(subcommand_for("hello_world").as_deref(), Some("hello"));
+        assert_eq!(subcommand_for("jz_hello_world").as_deref(), Some("hello"));
+        assert_eq!(subcommand_for("jz_tail_call_with_pda").as_deref(), Some("pda"));
+        assert_eq!(subcommand_for("jz_my_own_program"), None);
+    }
 }

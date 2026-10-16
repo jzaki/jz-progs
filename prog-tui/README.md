@@ -45,6 +45,7 @@ Everything else the walkthrough needs must already be installed: the RISC Zero t
 | `P` / `A` | Make the selected account `PAYER` / `ACCOUNT` |
 | `t` | Native token transfer. Prefilled from `PAYER` to the selected account (or `ACCOUNT`) |
 | `d` | Deploy the selected guest with `prog_cli` (Guests pane) |
+| `u` | Build and deploy a guest from `jz-progs/example_progs` (see below) |
 | `r` | Run the selected guest's stock `run_*` runner. It deploys again, so the programs it deploys are registered by name, and the TUI waits a block for the runner's last call to land before starting another job |
 | `c` | Call the selected deployment (Deployed pane). The form is prefilled; Enter sends |
 | `m` | `move-data`, for `hello_world_with_move_function` |
@@ -65,6 +66,17 @@ Everything else the walkthrough needs must already be installed: the RISC Zero t
 | `tail_call_with_pda` | `pda` | The callee is prefilled with the latest `hello_world_with_authorization` |
 
 **Every call is checked.** `prog_cli` waits for the transaction to be included, then reads the target state back. A call that leaves it unchanged was reverted (it is still included and charged). When that happens, the log shows the reason, taken from the sequencer's log: a guest panic, or an engine error such as `UnadmittedPublicActor`. This only works for a sequencer prog-tui started.
+
+## Your own programs
+
+Put a guest's source in `jz-progs/example_progs/<name>.rs`, as a single file like LEZ's example guests (`hello_world.rs` there is a copy of LEZ's). Then press `u` and give its path, relative to `example_progs`: prog-tui builds and deploys it as `jz_<name>`.
+
+- **How it builds:** prog-tui symlinks the file into LEZ's example guest package, `examples/program_deployment/methods/guest/src/bin/jz_<name>.rs`, and runs LEZ's normal guest build. So it uses LEZ's toolchain and lockfile, with nothing else to install, and the `.bin` lands in `$BIN` next to the examples.
+- **What it can use:** only that package's dependencies: `lee_core`, `borsh` and `risc0-zkvm`.
+- **Names:** the stem must be lowercase letters, digits and underscores. The `jz_` prefix keeps your programs apart from LEZ's, and prog-tui never replaces a regular file in LEZ, only its own links.
+- **In LEZ's git:** the links show as untracked files (`?? …/jz_hello_world.rs`).
+- **Calling it:** a copy of an example (`jz_hello_world`) gets the example's call form with `c`. Other programs have no call form yet.
+- **`b` builds them all:** it links every `.rs` in `example_progs` before building. When you delete a source, `b` removes its link and its built files.
 
 ## Native transfers
 

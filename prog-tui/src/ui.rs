@@ -370,6 +370,9 @@ fn draw_programs(frame: &mut Frame, area: Rect, app: &App) {
                 .filter(|d| &d.name == guest && !d.stale)
                 .count();
             let mut spans = vec![Span::raw(guest.clone())];
+            if guest.starts_with(crate::userprogs::PREFIX) {
+                spans.push(Span::raw(" (example_progs)").dark_gray());
+            }
             if count > 0 {
                 spans.push(Span::raw(format!(" ×{count}")).green());
             }
@@ -488,7 +491,7 @@ fn draw_checklist(frame: &mut Frame, area: Rect, app: &App) {
 fn draw_keys(frame: &mut Frame, area: Rect, app: &App) {
     let context = match app.focus {
         Focus::Accounts => "P payer · A account · n new · t transfer",
-        Focus::Guests => "d deploy · r stock runner",
+        Focus::Guests => "d deploy · r stock runner · u build+deploy file",
         Focus::Deployments => "c call · m move-data · x forget",
         Focus::Builtin => "read-only: details in the middle pane",
     };
@@ -513,6 +516,7 @@ fn draw_help(frame: &mut Frame) {
         ("t", "native token transfer (wallet auth-transfer send), checked by both balances"),
         ("d", "deploy the selected guest with prog_cli (Guests pane)"),
         ("r", "run the guest's stock run_* runner: deploys again and calls once"),
+        ("u", "build and deploy a guest from jz-progs/example_progs (as jz_<name>)"),
         ("c", "call the selected deployment (Deployed pane)"),
         ("m", "move-data, for hello_world_with_move_function"),
         ("x", "forget the selected deployment"),

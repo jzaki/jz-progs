@@ -24,6 +24,7 @@ use crate::{
     rpc::{AccountView, Rpc, describe_bytes, unhex},
     sequencer::{self, SeqStatus, StopTarget},
     state::Deployment,
+    userprogs,
     wallet::{
         WalletAccount, is_noise, parse_account_list, parse_new_account, parse_prog_cli,
         parse_program_ids,
@@ -291,7 +292,29 @@ pub async fn fetch_views(rpc: &Rpc, ids: Vec<String>) -> BTreeMap<String, Option
 
 // ---- Job steps ----
 
+/// Links every `example_progs/*.rs` into LEZ's guest package and drops links whose file is gone.
+pub fn sync_example_progs(ctx: &mut Ctx) -> anyhow::Result<()> {
+    let guest_src = ctx.lez.guest_src_dir();
+    for file in userprogs::sources(&userprogs::example_dir()) {
+        let (name, linked) = userprogs::link(&file, &guest_src)?;
+        if linked != userprogs::Linked::Unchanged {
+            ctx.log(format!("linked {} as guest {name}", file.display()));
+        }
+    }
+    for name in userprogs::prune(&guest_src) {
+        // The Guests list reads $BIN, so drop what the build left there too: the program
+        // binary, the raw ELF and its dep-info file.
+        let bin_dir = ctx.lez.bin_dir();
+        for built in [format!("{name}.bin"), name.clone(), format!("{name}.d")] {
+            let _ = std::fs::remove_file(bin_dir.join(built));
+        }
+        ctx.log(format!("removed {name}: its file is gone"));
+    }
+    Ok(())
+}
+
 pub async fn build(ctx: &mut Ctx) -> anyhow::Result<()> {
+    sync_example_progs(ctx)?;
     let mut command = ctx.command("cargo");
     command.args([
         "build",
@@ -309,6 +332,29 @@ pub async fn build(ctx: &mut Ctx) -> anyhow::Result<()> {
         None,
     )
     .await?;
+    Ok(())
+}
+
+/// Links `file` into LEZ's guest package, builds the guests, and deploys it as `jz_<stem>`.
+pub async fn build_and_deploy(ctx: &mut Ctx, file: &Path, payer: &str) -> anyhow::Result<()> {
+    let (name, linked) = userprogs::link(file, &ctx.lez.guest_src_dir())?;
+    ctx.log(format!(
+        "{} {} → guest {name}",
+        match linked {
+            userprogs::Linked::Unchanged => "already linked:",
+            _ => "linked",
+        },
+        file.display()
+    ));
+    let mut command = ctx.command("cargo");
+    command.args(["build", "--release", "-p", "example_program_deployment_methods"]);
+    ctx.run_ok(
+        "cargo build --release -p example_program_deployment_methods",
+        command,
+        None,
+    )
+    .await?;
+    deploy(ctx, &name, payer).await?;
     Ok(())
 }
 

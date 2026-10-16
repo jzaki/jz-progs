@@ -50,6 +50,11 @@ impl Lez {
         self.dir.join("target/release").join(name)
     }
 
+    /// The example guest package's `src/bin/`: each file there builds as a guest.
+    pub fn guest_src_dir(&self) -> PathBuf {
+        self.dir.join("examples/program_deployment/methods/guest/src/bin")
+    }
+
     pub fn prog_cli_src(&self) -> PathBuf {
         self.dir
             .join("examples/program_deployment/src/bin/prog_cli.rs")
