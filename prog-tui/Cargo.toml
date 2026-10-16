@@ -1,0 +1,15 @@
+[package]
+name = "prog-tui"
+version = "0.1.0"
+edition = "2024"
+description = "Terminal UI for deploying and testing the LEZ example programs locally"
+publish = false
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+ratatui = "0.29"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "io-util", "sync"] }
