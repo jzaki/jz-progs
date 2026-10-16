@@ -48,7 +48,7 @@ Everything else the walkthrough needs must already be installed: the RISC Zero t
 | `c` | Call the selected deployment (Deployed pane). The form is prefilled; Enter sends |
 | `m` | `move-data`, for `hello_world_with_move_function` |
 | `x` | Forget the selected deployment |
-| `e` | Show the `source` line for `env.sh` |
+| `e` | Print shell commands for the sequencer (watch its log, use it, stop it) and the `source` line for `env.sh` |
 | `L` | Change the LEZ checkout |
 | `Tab`, `↑↓`/`jk` | Switch pane, select |
 | `?` / `q` | Help / quit |
@@ -72,6 +72,7 @@ prog-tui starts the sequencer as `RISC0_DEV_MODE=1 just run-sequencer-standalone
 - **Process group:** in `.state/sequencer.pid`.
 - **Output:** in `.state/sequencer.log`.
 - **Started elsewhere?** A sequencer started any other way shows as "external". prog-tui asks before stopping it.
+- **From another terminal:** there's no console to attach to, since the sequencer has no terminal. You can still watch its log, use it through the wallet or RPC, and stop it. Press `e` to print those commands with the real paths and pid filled in.
 
 ## Your shell's env vars
 

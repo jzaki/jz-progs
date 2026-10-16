@@ -412,7 +412,7 @@ fn draw_keys(frame: &mut Frame, area: Rect, app: &App) {
     };
     frame.render_widget(
         Paragraph::new(format!(
-            " {context} │ W walkthrough · s seq start/stop · R reset · b build · i wallet init · Tab pane · ? help · q quit"
+            " {context} │ W walkthrough · s seq start/stop · e seq cmds · R reset · b build · i wallet init · Tab pane · ? help · q quit"
         ))
         .dark_gray(),
         area,
@@ -434,7 +434,7 @@ fn draw_help(frame: &mut Frame) {
         ("m", "move-data, for hello_world_with_move_function"),
         ("x", "forget the selected deployment"),
         ("h", "show or hide the header/segment accounts that deploys create"),
-        ("e", "show the env.sh line to source in your shell"),
+        ("e", "shell commands for the sequencer (log, wallet, stop) and the env.sh to source"),
         ("L", "change the LEZ checkout"),
         ("g", "refresh now"),
         ("Tab / ←→", "switch pane; ↑↓ or j/k select"),

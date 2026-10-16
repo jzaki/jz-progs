@@ -14,7 +14,7 @@ use crate::{
     jobs::{self, Ctx, Msg, Status, StepState},
     lez::Lez,
     rpc::{AccountView, Rpc},
-    sequencer::StopTarget,
+    sequencer::{self, StopTarget},
     state::{self, Deployment, Saved},
     wallet::WalletAccount,
 };
@@ -498,8 +498,9 @@ impl App {
                 self.clamp_selection();
             }
             KeyCode::Char('e') => {
-                let path = state::env_sh_path(&self.state_dir);
-                self.push_log(format!("source {}", path.display()));
+                for line in sequencer::sequencer_help(&self.state_dir, &self.rpc.url, &self.status.seq) {
+                    self.push_log(line);
+                }
             }
             KeyCode::Char('L') => {
                 self.modal = Modal::Form(Form::new(

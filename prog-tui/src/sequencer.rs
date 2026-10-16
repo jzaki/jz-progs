@@ -18,7 +18,10 @@ use std::{
 
 use anyhow::{Context as _, bail};
 
-use crate::lez::Lez;
+use crate::{
+    lez::Lez,
+    state::{env_sh_path, shell_quote},
+};
 
 #[derive(Clone, Debug, Default)]
 pub struct SeqStatus {
@@ -189,6 +192,42 @@ pub fn stop(target: StopTarget, url: &str, state_dir: &Path) -> anyhow::Result<(
     Ok(())
 }
 
+/// Shell commands for using the sequencer from another terminal. It has no terminal to attach
+/// to, so this is what you can do instead: watch its log, use it, stop it.
+pub fn sequencer_help(state_dir: &Path, rpc_url: &str, seq: &SeqStatus) -> Vec<String> {
+    let quote = |path: PathBuf| shell_quote(&path.display().to_string());
+    let mut lines = vec!["shell commands for the sequencer (copy into another terminal):".to_owned()];
+    let running = seq.port_open || seq.managed.is_some();
+    if running {
+        lines.push(format!(
+            "  watch the log:  tail -f {} | grep -v risc0_zkvm",
+            quote(log_file(state_dir))
+        ));
+    } else {
+        lines.push("  the sequencer isn't running (s starts it)".to_owned());
+    }
+    lines.push(format!(
+        "  load env vars:  source {}",
+        quote(env_sh_path(state_dir))
+    ));
+    lines.push(
+        "  use it:         cd \"$LEZ_DIR\" && just run-wallet account get --raw --scope all --account-id \"Public/$ACCOUNT\""
+            .to_owned(),
+    );
+    lines.push(format!(
+        "  chain height:   curl -s -X POST {} -H 'Content-Type: application/json' -d '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getLastBlockId\",\"params\":[]}}'",
+        shell_quote(rpc_url)
+    ));
+    match (seq.managed, seq.listener) {
+        (Some(pgid), _) => lines.push(format!("  stop it:        kill -INT -- -{pgid}")),
+        (None, Some(pid)) if seq.port_open => lines.push(format!(
+            "  stop it:        kill -INT {pid}   (started outside prog-tui)"
+        )),
+        _ => {}
+    }
+    lines
+}
+
 pub fn log_len(state_dir: &Path) -> u64 {
     fs::metadata(log_file(state_dir)).map_or(0, |meta| meta.len())
 }
@@ -282,6 +321,46 @@ mod tests {
         let ss = r#"LISTEN 0 1024 127.0.0.1:3040 0.0.0.0:* users:(("sequencer_serv",pid=12345,fd=31))"#;
         assert_eq!(parse_ss_pid(ss), Some(12345));
         assert_eq!(parse_ss_pid(""), None);
+    }
+
+    #[test]
+    fn help_for_a_managed_sequencer() {
+        let seq = SeqStatus {
+            healthy: true,
+            port_open: true,
+            managed: Some(4242),
+            listener: Some(4243),
+            block: Some(7),
+        };
+        let help = sequencer_help(Path::new("/s/it's"), "http://127.0.0.1:3040", &seq).join("\n");
+        assert!(help.contains("tail -f '/s/it'\\''s/sequencer.log'"));
+        assert!(help.contains("source '/s/it'\\''s/env.sh'"));
+        assert!(help.contains("kill -INT -- -4242"));
+        assert!(help.contains("curl -s -X POST 'http://127.0.0.1:3040'"));
+        assert!(!help.contains("4243"));
+    }
+
+    #[test]
+    fn help_for_an_external_sequencer() {
+        let seq = SeqStatus {
+            healthy: true,
+            port_open: true,
+            managed: None,
+            listener: Some(4243),
+            block: None,
+        };
+        let help = sequencer_help(Path::new("/s"), "http://127.0.0.1:3040", &seq).join("\n");
+        assert!(help.contains("kill -INT 4243   (started outside prog-tui)"));
+        assert!(!help.contains("kill -INT -- -"));
+    }
+
+    #[test]
+    fn help_for_a_stopped_sequencer() {
+        let help = sequencer_help(Path::new("/s"), "http://x", &SeqStatus::default()).join("\n");
+        assert!(help.contains("isn't running"));
+        assert!(!help.contains("tail -f"));
+        assert!(!help.contains("kill"));
+        assert!(help.contains("source '/s/env.sh'"));
     }
 
     #[test]

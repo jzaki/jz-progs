@@ -108,7 +108,7 @@ pub fn resolve_lez_dir(crate_dir: &Path, lez_dir: &str) -> PathBuf {
     fs::canonicalize(&path).unwrap_or(path)
 }
 
-fn shell_quote(value: &str) -> String {
+pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
