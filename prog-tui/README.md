@@ -29,7 +29,7 @@ Everything else the walkthrough needs must already be installed: the RISC Zero t
 - **Status bar:** the LEZ checkout (branch, commit, dirty, whether `prog_cli` is built), the sequencer (stopped, starting, or running; started by prog-tui or not; block height), and `PAYER` / `ACCOUNT`.
 - **Accounts:** the wallet's accounts. ★ marks `PAYER`, ▶ marks `ACCOUNT`, and each shows its balance, or `off-chain` when it doesn't exist on chain yet. Deploys create a header and some segment accounts in the wallet; `h` shows or hides them.
 - **Account:** the selected account's nonce, balance, and every program's actor state on it. Each state is labelled by program name when prog-tui deployed that program, and shown as text when it's printable.
-- **Programs:** the built guests (`$BIN`) and the programs deployed from here. Crossed out means no longer on chain, after a reset.
+- **Programs:** three lists. *Guests* are the built example guests (`$BIN`). *Deployed* are the programs deployed from here; crossed out means no longer on chain, after a reset. *Built-in* is read-only: the native token and program loader (both run by the engine), and the guests in `lez/programs/` (clock, fee, bridge and so on). Those guests are dimmed when the current chain didn't deploy them, which on the dev chain is all but `clock`, `fee`, `bridge` and `sequencer_stake`. Select one to see its full address and where it comes from. Their names also label the actor states in the Account pane.
 - **Log:** each command and its output. The full output of every job is in `.state/logs/`.
 
 ## Keys

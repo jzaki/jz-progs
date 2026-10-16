@@ -2,6 +2,7 @@
 //! See README.md for what each pane and key does.
 
 mod app;
+mod builtin;
 mod jobs;
 mod lez;
 mod rpc;

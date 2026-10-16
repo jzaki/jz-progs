@@ -11,6 +11,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::{runtime::Handle, sync::mpsc::UnboundedSender};
 
 use crate::{
+    builtin::{self, Builtin},
     jobs::{self, Ctx, Msg, Status, StepState},
     lez::Lez,
     rpc::{AccountView, Rpc},
@@ -26,6 +27,7 @@ pub enum Focus {
     Accounts,
     Guests,
     Deployments,
+    Builtin,
 }
 
 pub struct Form {
@@ -92,6 +94,8 @@ pub struct App {
     pub selected_account: usize,
     pub selected_guest: usize,
     pub selected_deployment: usize,
+    pub selected_builtin: usize,
+    pub builtins: Vec<Builtin>,
     /// Hide the header and segment accounts that deploys create.
     pub hide_loader: bool,
     pub log: VecDeque<String>,
@@ -136,6 +140,8 @@ impl App {
             selected_account: 0,
             selected_guest: 0,
             selected_deployment: 0,
+            selected_builtin: 0,
+            builtins: builtin::builtins(),
             hide_loader: true,
             log: VecDeque::new(),
             busy: None,
@@ -176,28 +182,17 @@ impl App {
 
     // ---- What the panes show ----
 
-    /// The program-loader program's id, learned from a deployment's header account.
-    pub fn loader_id(&self) -> Option<&str> {
-        self.saved.deployments.iter().find_map(|deployment| {
-            let view = self.views.get(&deployment.program_id)?.as_ref()?;
-            (view.actor_states.len() == 1)
-                .then(|| view.actor_states.keys().next().map(String::as_str))
-                .flatten()
-        })
-    }
-
+    /// Header and segment accounts that deploys create: the ones holding only program-loader state.
     fn is_loader_account(&self, id: &str) -> bool {
         if self.saved.deployments.iter().any(|d| d.program_id == id) {
             return true;
         }
-        let Some(loader) = self.loader_id() else {
-            return false;
-        };
+        let loader = builtin::program_loader_id();
         self.views
             .get(id)
             .and_then(Option::as_ref)
             .is_some_and(|view| {
-                !view.actor_states.is_empty() && view.actor_states.keys().all(|key| key == loader)
+                !view.actor_states.is_empty() && view.actor_states.keys().all(|key| *key == loader)
             })
     }
 
@@ -218,16 +213,13 @@ impl App {
     }
 
     pub fn program_label(&self, program_id: &str) -> String {
-        if program_id == crate::rpc::NATIVE_TOKEN {
-            return "native token".to_owned();
-        }
         if let Some(name) = self.saved.program_name(program_id) {
             return name.to_owned();
         }
-        if self.loader_id() == Some(program_id) {
-            return "program_loader".to_owned();
+        match self.builtins.iter().find(|builtin| builtin.id == program_id) {
+            Some(builtin) => builtin.name.to_owned(),
+            None => jobs::short(program_id),
         }
-        jobs::short(program_id)
     }
 
     // ---- Periodic refreshes ----
@@ -285,6 +277,13 @@ impl App {
                 .map(|account| account.id.clone())
                 .collect();
             ids.extend(self.saved.deployments.iter().map(|d| d.program_id.clone()));
+            // Engine programs have no account to look up; the others are deployed at genesis.
+            ids.extend(
+                self.builtins
+                    .iter()
+                    .filter(|builtin| !builtin.engine)
+                    .map(|builtin| builtin.id.clone()),
+            );
             ids.sort();
             ids.dedup();
             let (rpc, tx) = (self.rpc.clone(), self.tx.clone());
@@ -387,6 +386,9 @@ impl App {
         self.selected_deployment = self
             .selected_deployment
             .min(self.saved.deployments.len().saturating_sub(1));
+        self.selected_builtin = self
+            .selected_builtin
+            .min(self.builtins.len().saturating_sub(1));
     }
 
     // ---- Jobs ----
@@ -482,6 +484,12 @@ impl App {
     }
 
     fn on_main_key(&mut self, key: KeyEvent) {
+        if self.focus == Focus::Builtin
+            && matches!(key.code, KeyCode::Char('d' | 'r' | 'c' | 'm' | 'x'))
+        {
+            self.push_log("built-in programs are read-only: you can't deploy, call or forget them".to_owned());
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('?') => self.modal = Modal::Help,
@@ -565,8 +573,9 @@ impl App {
     fn cycle_focus(&mut self, forward: bool) {
         self.focus = match (self.focus, forward) {
             (Focus::Accounts, true) | (Focus::Deployments, false) => Focus::Guests,
-            (Focus::Guests, true) | (Focus::Accounts, false) => Focus::Deployments,
-            (Focus::Deployments, true) | (Focus::Guests, false) => Focus::Accounts,
+            (Focus::Guests, true) | (Focus::Builtin, false) => Focus::Deployments,
+            (Focus::Deployments, true) | (Focus::Accounts, false) => Focus::Builtin,
+            (Focus::Builtin, true) | (Focus::Guests, false) => Focus::Accounts,
         };
     }
 
@@ -576,6 +585,7 @@ impl App {
             Focus::Accounts => (&mut self.selected_account, visible),
             Focus::Guests => (&mut self.selected_guest, self.guests.len()),
             Focus::Deployments => (&mut self.selected_deployment, self.saved.deployments.len()),
+            Focus::Builtin => (&mut self.selected_builtin, self.builtins.len()),
         };
         *selected = selected.saturating_add_signed(delta).min(len.saturating_sub(1));
         self.clamp_selection();
