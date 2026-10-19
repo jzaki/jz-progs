@@ -73,6 +73,27 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 area,
             );
         }
+        Modal::Pick(pick) => {
+            let height = u16::try_from(pick.options.len()).unwrap_or(20) + 2;
+            let area = centered(frame.area(), 90, height);
+            frame.render_widget(Clear, area);
+            let items: Vec<ListItem> = pick
+                .options
+                .iter()
+                .map(|(label, _)| ListItem::new(label.as_str()))
+                .collect();
+            let block = Block::bordered()
+                .title(format!(" {} ", pick.title))
+                .title_bottom(" Enter choose · ↑↓ select · Esc cancel ")
+                .border_style(Color::Cyan);
+            frame.render_stateful_widget(
+                List::new(items)
+                    .block(block)
+                    .highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+                area,
+                &mut ListState::default().with_selected(Some(pick.selected)),
+            );
+        }
         Modal::Form(form) => {
             let height = u16::try_from(form.fields.len()).unwrap_or(4) + 4;
             let area = centered(frame.area(), 90, height);
@@ -424,7 +445,7 @@ fn draw_programs(frame: &mut Frame, area: Rect, app: &App) {
         .collect();
     frame.render_stateful_widget(
         List::new(deployments)
-            .block(pane("Deployed (c call, x forget)", app.focus == Focus::Deployments))
+            .block(pane("Deployed (c call, v messages, x forget)", app.focus == Focus::Deployments))
             .highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
         deployments_area,
         &mut ListState::default().with_selected(Some(app.selected_deployment)),
@@ -506,7 +527,7 @@ fn draw_keys(frame: &mut Frame, area: Rect, app: &App) {
     let context = match app.focus {
         Focus::Accounts => "P payer · A account · n new · t transfer",
         Focus::Guests => "v messages · d deploy · r stock runner · u build+deploy file",
-        Focus::Deployments => "c call · m move-data · v messages · x forget",
+        Focus::Deployments => "c call (pick message) · m move-data · v messages · x forget",
         Focus::Builtin => "read-only: details in the middle pane",
     };
     frame.render_widget(
@@ -532,7 +553,7 @@ fn draw_help(frame: &mut Frame) {
         ("d", "deploy the selected guest with prog_cli (Guests pane)"),
         ("r", "run the guest's stock run_* runner: deploys again and calls once"),
         ("u", "build and deploy a guest from jz-progs/example_progs (as jz_<name>)"),
-        ("c", "call the selected deployment (Deployed pane)"),
+        ("c", "call the selected deployment: pick a message from its source, fill in its params"),
         ("m", "move-data, for hello_world_with_move_function"),
         ("x", "forget the selected deployment"),
         ("h", "show or hide the header/segment accounts that deploys create"),

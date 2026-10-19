@@ -68,6 +68,30 @@ pub enum FormAction {
         subcommand: String,
         extra: Vec<String>,
     },
+    /// `prog_cli send`: fields `account`, one per param, then `sign`. The params are
+    /// Borsh-encoded by type into the message.
+    Send {
+        program_id: String,
+        index: Option<u8>,
+        param_types: Vec<String>,
+    },
+}
+
+/// A list to choose one entry from.
+pub struct Pick {
+    pub title: String,
+    pub options: Vec<(String, PickAction)>,
+    pub selected: usize,
+}
+
+pub enum PickAction {
+    /// Ask for this message's params, then `prog_cli send` it.
+    Method {
+        deployment: Deployment,
+        method: msgtypes::Method,
+    },
+    /// A ready-made call form for one of the stock examples.
+    Prefilled(Form),
 }
 
 #[derive(Clone, Copy)]
@@ -82,6 +106,7 @@ pub enum Modal {
     Help,
     /// Read-only text, `(title, lines)`; any key closes it.
     Text(String, Vec<String>),
+    Pick(Pick),
     Form(Form),
     Confirm(String, Confirmed),
 }
@@ -487,8 +512,36 @@ impl App {
                     self.modal = Modal::Confirm(text, action);
                 }
             }
+            Modal::Pick(pick) => self.on_pick_key(pick, key),
             Modal::Form(form) => self.on_form_key(form, key),
         }
+    }
+
+    fn on_pick_key(&mut self, mut pick: Pick, key: KeyEvent) {
+        let last = pick.options.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Esc => return,
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => {
+                pick.selected = (pick.selected + 1).min(last);
+            }
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => {
+                pick.selected = pick.selected.saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                if pick.selected < pick.options.len() {
+                    let (_, action) = pick.options.swap_remove(pick.selected);
+                    self.modal = Modal::Form(match action {
+                        PickAction::Prefilled(form) => form,
+                        PickAction::Method { deployment, method } => {
+                            send_form(&self.saved, &deployment, method)
+                        }
+                    });
+                }
+                return;
+            }
+            _ => {}
+        }
+        self.modal = Modal::Pick(pick);
     }
 
     fn on_main_key(&mut self, key: KeyEvent) {
@@ -572,7 +625,7 @@ impl App {
             KeyCode::Char('d') => self.deploy_selected(),
             KeyCode::Char('r') => self.run_runner(),
             KeyCode::Char('v') => self.show_messages(),
-            KeyCode::Char('c') => self.open_call(false),
+            KeyCode::Char('c') => self.open_pick(),
             KeyCode::Char('m') => self.open_call(true),
             KeyCode::Char('x')
                 if self.focus == Focus::Deployments
@@ -788,18 +841,66 @@ impl App {
             self.push_log("select a guest or deployment in the Programs pane to see its messages".to_owned());
             return;
         };
-        let source = self.lez.guest_src_dir().join(format!("{guest}.rs"));
-        let parsed = std::fs::read_to_string(&source)
-            .map_err(anyhow::Error::from)
-            .and_then(|text| msgtypes::parse(&text));
-        match parsed {
-            Ok(interface) => {
+        match self.guest_interface(&guest) {
+            Ok((source, interface)) => {
                 let mut lines = vec![source.display().to_string(), String::new()];
                 lines.extend(interface.lines());
                 self.modal = Modal::Text(format!("{guest}: messages"), lines);
             }
-            Err(error) => self.push_log(format!("✗ {guest}: {} ({error:#})", source.display())),
+            Err(error) => self.push_log(format!("✗ {guest}: {error:#}")),
         }
+    }
+
+    /// A guest's source in the guest package's `src/bin/`, parsed for its messages.
+    fn guest_interface(&self, guest: &str) -> anyhow::Result<(PathBuf, msgtypes::Interface)> {
+        let source = self.lez.guest_src_dir().join(format!("{guest}.rs"));
+        let text = std::fs::read_to_string(&source)
+            .map_err(|error| anyhow::anyhow!("{}: {error}", source.display()))?;
+        let interface =
+            msgtypes::parse(&text).map_err(|error| anyhow::anyhow!("{}: {error}", source.display()))?;
+        Ok((source, interface))
+    }
+
+    /// `c`: pick one of the deployment's messages, read from its source, or a stock example's
+    /// prefilled call.
+    fn open_pick(&mut self) {
+        if self.focus != Focus::Deployments {
+            self.push_log("select a deployment in the Programs pane to call it".to_owned());
+            return;
+        }
+        let Some(deployment) = self.saved.deployments.get(self.selected_deployment).cloned() else {
+            return;
+        };
+        let mut options: Vec<(String, PickAction)> = Vec::new();
+        match self.guest_interface(&deployment.name) {
+            Ok((_, interface)) => {
+                for method in interface.methods() {
+                    let action = PickAction::Method {
+                        deployment: deployment.clone(),
+                        method: method.clone(),
+                    };
+                    options.push((method.label, action));
+                }
+            }
+            Err(error) => self.push_log(format!("✗ no message types for {}: {error:#}", deployment.name)),
+        }
+        for alternate in [false, true] {
+            if let Some(form) = call_form(&self.saved, &deployment, alternate) {
+                let label = match &form.action {
+                    FormAction::Call { subcommand, .. } => format!("prog_cli {subcommand} (prefilled)"),
+                    _ => "prefilled".to_owned(),
+                };
+                options.push((label, PickAction::Prefilled(form)));
+            }
+        }
+        if options.is_empty() {
+            return;
+        }
+        self.modal = Modal::Pick(Pick {
+            title: format!("{}: pick a message", deployment.name),
+            options,
+            selected: 0,
+        });
     }
 
     fn open_call(&mut self, alternate: bool) {
@@ -931,8 +1032,88 @@ impl App {
                     jobs::call(&mut ctx, &payer, &args).await.map(|_| ())
                 });
             }
+            FormAction::Send {
+                ref program_id,
+                index,
+                ref param_types,
+            } => {
+                let account = jobs::bare_account_id(&values[0]).to_owned();
+                if account.is_empty() {
+                    self.push_log("✗ account is empty".to_owned());
+                    self.modal = Modal::Form(form);
+                    return;
+                }
+                let params: Vec<(&str, &str)> = param_types
+                    .iter()
+                    .map(String::as_str)
+                    .zip(values[1..=param_types.len()].iter().map(String::as_str))
+                    .collect();
+                let message = match msgtypes::encode_message(index, &params) {
+                    Ok(message) => message,
+                    Err(error) => {
+                        self.push_log(format!("✗ {error:#}"));
+                        self.modal = Modal::Form(form);
+                        return;
+                    }
+                };
+                let sign = values
+                    .last()
+                    .is_some_and(|sign| matches!(sign.as_str(), "y" | "yes" | "true"));
+                if !self.prog_cli_ready() {
+                    return;
+                }
+                let Some(payer) = self.need("PAYER (key P)", self.saved.payer.clone().as_ref()) else {
+                    return;
+                };
+                let mut args: Vec<String> = [
+                    "send",
+                    "--program",
+                    program_id,
+                    "--account",
+                    &account,
+                    "--message-hex",
+                    &msgtypes::hex(&message),
+                ]
+                .map(str::to_owned)
+                .to_vec();
+                if sign {
+                    args.push("--sign".to_owned());
+                }
+                let name = form.title.split(':').next().unwrap_or("send").to_owned();
+                self.spawn_job(&format!("send to {name}"), move |mut ctx| async move {
+                    jobs::call(&mut ctx, &payer, &args).await.map(|_| ())
+                });
+            }
         }
     }
+}
+
+/// The form for one message: the account, each param (prefilled with `ACCOUNT` for an account
+/// id), and whether `account` signs.
+fn send_form(saved: &Saved, deployment: &Deployment, method: msgtypes::Method) -> Form {
+    let account = saved.account.clone().unwrap_or_default();
+    let mut fields = vec![("account".to_owned(), account.clone())];
+    for (i, param) in method.params.iter().enumerate() {
+        let name = param.name.clone().unwrap_or_else(|| format!("#{i}"));
+        let label = format!("{name}: {} ({})", param.ty, msgtypes::hint(&param.ty));
+        let value = if param.ty.ends_with("AccountId") {
+            account.clone()
+        } else {
+            String::new()
+        };
+        fields.push((label, value));
+    }
+    fields.push(("sign (y/n)".to_owned(), "n".to_owned()));
+    let param_types = method.params.iter().map(|p| p.ty.clone()).collect();
+    Form::new(
+        format!("{}: {} → prog_cli send", deployment.name, method.label.trim()),
+        fields,
+        FormAction::Send {
+            program_id: deployment.program_id.clone(),
+            index: method.index,
+            param_types,
+        },
+    )
 }
 
 fn stop_note(stop: Option<StopTarget>) -> String {

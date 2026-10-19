@@ -48,7 +48,7 @@ Everything else the walkthrough needs must already be installed: the RISC Zero t
 | `d` | Deploy the selected guest with `prog_cli` (Guests pane) |
 | `u` | Build and deploy a guest from `jz-progs/example_progs` (see below) |
 | `r` | Run the selected guest's stock `run_*` runner. It deploys again, so the programs it deploys are registered by name, and the TUI waits a block for the runner's last call to land before starting another job |
-| `c` | Call the selected deployment (Deployed pane). The form is prefilled; Enter sends |
+| `c` | Call the selected deployment (Deployed pane). Pick a message, then fill in its params; Enter sends. See below |
 | `m` | `move-data`, for `hello_world_with_move_function` |
 | `x` | Forget the selected deployment |
 | `e` | Print shell commands for the sequencer (watch its log, use it, stop it) and the `source` line for `env.sh` |
@@ -56,9 +56,27 @@ Everything else the walkthrough needs must already be installed: the RISC Zero t
 | `Tab`, `↑↓`/`jk` | Switch pane, select |
 | `?` / `q` | Help / quit |
 
-**What each deployment's call sends:**
+**Calling a deployment.** `c` lists the messages the program accepts, read from its source the way `v` reads them. It has one entry per enum variant, or one for a single message type. Choosing one opens a form with these fields:
+- **`account`:** the account whose actor receives the message. It's prefilled with `ACCOUNT`.
+- **One field per parameter, in Borsh order:**
 
-| Deployment | `c` sends | Notes |
+  | Type | What to type |
+  |---|---|
+  | `Vec<u8>` | text, or `0x…` hex |
+  | `String` | text |
+  | integers | decimal |
+  | `bool` | `true` or `false` |
+  | `AccountId` | base58 (prefilled with `ACCOUNT`) |
+  | `Actor` | `account,program` |
+  | `[u8; N]` | hex |
+  | anything else | the hex of its Borsh encoding |
+- **`sign`:** `y` signs with the account's key, for handlers that check `is_authorized`.
+
+prog-tui encodes the message and sends it with `prog_cli send --program … --account … --message-hex …`. That call targets one actor only, so a message that makes the program call another actor (like `simple_tail_call`) needs its prefilled entry.
+
+**The prefilled entries.** The stock examples also list their ready-made `prog_cli` calls in the picker:
+
+| Deployment | Prefilled entry | Notes |
 |---|---|---|
 | `hello_world` | `prog_cli hello` | Appends text to the account's state |
 | `hello_world_with_authorization` | `hello --sign` | The account signs |
@@ -76,7 +94,7 @@ Put a guest's source in `jz-progs/example_progs/<name>.rs`, as a single file lik
 - **What it can use:** only that package's dependencies: `lee_core`, `borsh` and `risc0-zkvm`.
 - **Names:** the stem must be lowercase letters, digits and underscores. The `jz_` prefix keeps your programs apart from LEZ's, and prog-tui never replaces a regular file in LEZ, only its own links.
 - **In LEZ's git:** the links show as untracked files (`?? …/jz_hello_world.rs`).
-- **Calling it:** a copy of an example (`jz_hello_world`) gets the example's call form with `c`. Other programs have no call form yet.
+- **Calling it:** `c` picks one of its messages from its source and asks for the params (see "Calling a deployment" above). A copy of an example (`jz_hello_world`) also gets the example's prefilled call. This needs a `prog_cli` with `send`.
 - **`b` builds them all:** it links every `.rs` in `example_progs` before building. When you delete a source, `b` removes its link and its built files.
 
 ## Native transfers
