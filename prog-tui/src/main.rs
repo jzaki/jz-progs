@@ -5,6 +5,7 @@ mod app;
 mod builtin;
 mod jobs;
 mod lez;
+mod msgtypes;
 mod rpc;
 mod sequencer;
 mod state;

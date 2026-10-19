@@ -14,6 +14,7 @@ use crate::{
     builtin::{self, Builtin},
     jobs::{self, Ctx, Msg, Status, StepState},
     lez::Lez,
+    msgtypes,
     rpc::{AccountView, Rpc},
     sequencer::{self, StopTarget},
     state::{self, Deployment, Saved},
@@ -79,6 +80,8 @@ pub enum Confirmed {
 pub enum Modal {
     None,
     Help,
+    /// Read-only text, `(title, lines)`; any key closes it.
+    Text(String, Vec<String>),
     Form(Form),
     Confirm(String, Confirmed),
 }
@@ -476,7 +479,7 @@ impl App {
         }
         match std::mem::replace(&mut self.modal, Modal::None) {
             Modal::None => self.on_main_key(key),
-            Modal::Help => {}
+            Modal::Help | Modal::Text(..) => {}
             Modal::Confirm(text, action) => {
                 if matches!(key.code, KeyCode::Char('y' | 'Y')) {
                     self.confirmed(action);
@@ -568,6 +571,7 @@ impl App {
             KeyCode::Char('A') => self.set_role(false),
             KeyCode::Char('d') => self.deploy_selected(),
             KeyCode::Char('r') => self.run_runner(),
+            KeyCode::Char('v') => self.show_messages(),
             KeyCode::Char('c') => self.open_call(false),
             KeyCode::Char('m') => self.open_call(true),
             KeyCode::Char('x')
@@ -766,6 +770,36 @@ impl App {
         self.spawn_job(&args[0].clone(), move |mut ctx| async move {
             jobs::runner(&mut ctx, &args).await
         });
+    }
+
+    /// The message types the selected guest (or deployment) accepts, read from its source in the
+    /// guest package's `src/bin/`.
+    fn show_messages(&mut self) {
+        let guest = match self.focus {
+            Focus::Guests => self.guests.get(self.selected_guest).cloned(),
+            Focus::Deployments => self
+                .saved
+                .deployments
+                .get(self.selected_deployment)
+                .map(|deployment| deployment.name.clone()),
+            _ => None,
+        };
+        let Some(guest) = guest else {
+            self.push_log("select a guest or deployment in the Programs pane to see its messages".to_owned());
+            return;
+        };
+        let source = self.lez.guest_src_dir().join(format!("{guest}.rs"));
+        let parsed = std::fs::read_to_string(&source)
+            .map_err(anyhow::Error::from)
+            .and_then(|text| msgtypes::parse(&text));
+        match parsed {
+            Ok(interface) => {
+                let mut lines = vec![source.display().to_string(), String::new()];
+                lines.extend(interface.lines());
+                self.modal = Modal::Text(format!("{guest}: messages"), lines);
+            }
+            Err(error) => self.push_log(format!("✗ {guest}: {} ({error:#})", source.display())),
+        }
     }
 
     fn open_call(&mut self, alternate: bool) {

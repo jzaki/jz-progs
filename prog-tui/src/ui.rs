@@ -49,6 +49,20 @@ pub fn draw(frame: &mut Frame, app: &App) {
     match &app.modal {
         Modal::None => {}
         Modal::Help => draw_help(frame),
+        Modal::Text(title, text) => {
+            let height = u16::try_from(text.len()).unwrap_or(20) + 2;
+            let area = centered(frame.area(), 100, height);
+            frame.render_widget(Clear, area);
+            let lines: Vec<Line> = text.iter().map(|line| Line::from(line.as_str())).collect();
+            frame.render_widget(
+                Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+                    Block::bordered()
+                        .title(format!(" {title} (any key closes) "))
+                        .border_style(Color::Cyan),
+                ),
+                area,
+            );
+        }
         Modal::Confirm(text, _) => {
             let area = centered(frame.area(), 70, 5);
             frame.render_widget(Clear, area);
@@ -491,8 +505,8 @@ fn draw_checklist(frame: &mut Frame, area: Rect, app: &App) {
 fn draw_keys(frame: &mut Frame, area: Rect, app: &App) {
     let context = match app.focus {
         Focus::Accounts => "P payer · A account · n new · t transfer",
-        Focus::Guests => "d deploy · r stock runner · u build+deploy file",
-        Focus::Deployments => "c call · m move-data · x forget",
+        Focus::Guests => "v messages · d deploy · r stock runner · u build+deploy file",
+        Focus::Deployments => "c call · m move-data · v messages · x forget",
         Focus::Builtin => "read-only: details in the middle pane",
     };
     frame.render_widget(
@@ -514,6 +528,7 @@ fn draw_help(frame: &mut Frame) {
         ("n", "new public account"),
         ("P / A", "make the selected account PAYER / ACCOUNT"),
         ("t", "native token transfer (wallet auth-transfer send), checked by both balances"),
+        ("v", "the message types the selected guest or deployment accepts, read from its source"),
         ("d", "deploy the selected guest with prog_cli (Guests pane)"),
         ("r", "run the guest's stock run_* runner: deploys again and calls once"),
         ("u", "build and deploy a guest from jz-progs/example_progs (as jz_<name>)"),

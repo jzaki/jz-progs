@@ -44,6 +44,7 @@ Everything else the walkthrough needs must already be installed: the RISC Zero t
 | `n` | New public account, with an optional label |
 | `P` / `A` | Make the selected account `PAYER` / `ACCOUNT` |
 | `t` | Native token transfer. Prefilled from `PAYER` to the selected account (or `ACCOUNT`) |
+| `v` | Show the message types the selected guest (or deployment) accepts, with each variant's Borsh index. A built guest doesn't record its message types, so this reads the guest's source in LEZ's guest package (`src/bin/<name>.rs`). It finds the handler named in `actor_entrypoint!` and the type of that handler's message parameter. An enum or struct is listed only if that file defines it |
 | `d` | Deploy the selected guest with `prog_cli` (Guests pane) |
 | `u` | Build and deploy a guest from `jz-progs/example_progs` (see below) |
 | `r` | Run the selected guest's stock `run_*` runner. It deploys again, so the programs it deploys are registered by name, and the TUI waits a block for the runner's last call to land before starting another job |
