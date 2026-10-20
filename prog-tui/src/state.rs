@@ -24,6 +24,14 @@ pub struct Deployment {
     pub stale: bool,
 }
 
+/// An account outside the wallet whose state the Accounts pane shows, such as a program's PDA.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Watched {
+    pub id: String,
+    /// What it is, e.g. `PDA of jz_admin_seat`.
+    pub note: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Saved {
@@ -34,6 +42,7 @@ pub struct Saved {
     /// Piped to `wallet check-health` on first run. The wallet doesn't use it yet.
     pub wallet_password: String,
     pub deployments: Vec<Deployment>,
+    pub watched: Vec<Watched>,
 }
 
 impl Default for Saved {
@@ -44,6 +53,7 @@ impl Default for Saved {
             account: None,
             wallet_password: "prog-tui".to_owned(),
             deployments: Vec::new(),
+            watched: Vec::new(),
         }
     }
 }
@@ -87,6 +97,21 @@ impl Saved {
         self.payer = None;
         self.account = None;
         self.deployments.clear();
+        self.watched.clear();
+    }
+
+    /// Adds `id` to the watched accounts, or updates its note. Returns whether it was new.
+    pub fn watch(&mut self, id: String, note: String) -> bool {
+        match self.watched.iter_mut().find(|watched| watched.id == id) {
+            Some(watched) => {
+                watched.note = note;
+                false
+            }
+            None => {
+                self.watched.push(Watched { id, note });
+                true
+            }
+        }
     }
 }
 
@@ -172,6 +197,22 @@ mod tests {
         assert!(!script.contains("ACCOUNT="));
         assert!(script.contains("export PROGRAM_HELLO_WORLD='NEW'\n"));
         assert!(!script.contains("OLD"));
+    }
+
+    #[test]
+    fn watching_twice_updates_the_note_and_a_reset_forgets() {
+        let mut saved = Saved::default();
+        assert!(saved.watch("PDA".into(), "first".into()));
+        assert!(!saved.watch("PDA".into(), "PDA of jz_admin_seat".into()));
+        assert_eq!(
+            saved.watched,
+            vec![Watched {
+                id: "PDA".into(),
+                note: "PDA of jz_admin_seat".into()
+            }]
+        );
+        saved.clear_chain();
+        assert!(saved.watched.is_empty());
     }
 
     #[test]

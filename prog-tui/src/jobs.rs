@@ -59,6 +59,8 @@ pub enum Msg {
     SetPayer(String),
     SetAccount(String),
     Deployed(Deployment),
+    /// Show this account's state in the Accounts pane: `(id, note)`.
+    Watch(String, String),
     /// The chain and wallet were wiped.
     ChainReset,
     Checklist(Vec<String>),
@@ -498,7 +500,13 @@ pub async fn deploy(ctx: &mut Ctx, guest: &str, payer: &str) -> anyhow::Result<D
 }
 
 /// Sends one `prog_cli` call. On a revert, shows why, from the sequencer's log.
-pub async fn call(ctx: &mut Ctx, payer: &str, args: &[String]) -> anyhow::Result<Vec<u8>> {
+/// What a `prog_cli` call left behind: the target actor's state, and the target's account.
+pub struct Called {
+    pub state: Vec<u8>,
+    pub account: Option<String>,
+}
+
+pub async fn call(ctx: &mut Ctx, payer: &str, args: &[String]) -> anyhow::Result<Called> {
     let log_offset = sequencer::log_len(&ctx.state_dir);
     let managed = sequencer::managed_pgid(&ctx.state_dir).is_some();
     let command = ctx.prog_cli(payer, args);
@@ -527,7 +535,8 @@ pub async fn call(ctx: &mut Ctx, payer: &str, args: &[String]) -> anyhow::Result
         report_revert(ctx, log_offset, managed).await;
         bail!("the call didn't change the target state");
     }
-    Ok(state)
+    let account = result.and_then(|result| result["account"].as_str().map(str::to_owned));
+    Ok(Called { state, account })
 }
 
 /// Logs why a transaction reverted: the sequencer log lines written since `log_offset`. Only a
@@ -825,7 +834,7 @@ pub async fn walkthrough(ctx: &mut Ctx, stop: Option<StopTarget>) -> anyhow::Res
                 greeting,
             ]
             .map(str::to_owned);
-            let state = call(ctx, &payer, &args).await?;
+            let state = call(ctx, &payer, &args).await?.state;
             check_greeting(&state, greeting)
         }
         .await);

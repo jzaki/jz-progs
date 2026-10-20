@@ -44,6 +44,7 @@ Everything else the walkthrough needs must already be installed: the RISC Zero t
 | `n` | New public account, with an optional label |
 | `P` / `A` | Make the selected account `PAYER` / `ACCOUNT` |
 | `t` | Native token transfer. Prefilled from `PAYER` to the selected account (or `ACCOUNT`) |
+| `w` / `x` | Watch an account outside the wallet, such as a PDA, so the Accounts pane shows it (◇) and the middle pane shows its actor states / forget the selected watched account. A `send` with a `pda seed` watches its PDA by itself. A reset forgets them all |
 | `v` | Show the message types the selected guest (or deployment) accepts, with each variant's Borsh index. A built guest doesn't record its message types, so this reads the guest's source in LEZ's guest package (`src/bin/<name>.rs`). It finds the handler named in `actor_entrypoint!` and the type of that handler's message parameter. An enum or struct is listed only if that file defines it |
 | `d` | Deploy the selected guest with `prog_cli` (Guests pane) |
 | `u` | Build and deploy a guest from `jz-progs/example_progs` (see below) |
@@ -70,9 +71,13 @@ Everything else the walkthrough needs must already be installed: the RISC Zero t
   | `Actor` | `account,program` |
   | `[u8; N]` | hex |
   | anything else | the hex of its Borsh encoding |
+- **`also`** (optional): more accounts, comma-separated. The program's actor on each is declared in the transaction, for a message the handler passes on to them.
+- **`pda seed`** (optional): a seed as base58 (an account id) or `0x` hex. The program's actor on that PDA is declared, with the PDA's admission evidence, and the PDA's state is the one checked afterwards.
 - **`sign`:** `y` signs with the account's key, for handlers that check `is_authorized`.
 
-prog-tui encodes the message and sends it with `prog_cli send --program … --account … --message-hex …`. That call targets one actor only, so a message that makes the program call another actor (like `simple_tail_call`) needs its prefilled entry.
+prog-tui encodes the message and sends it with `prog_cli send --program … --account … --message-hex … [--also …] [--pda-seed …] [--sign]`. The extra actors all run this same program. A message that calls a different program (like `simple_tail_call`) still needs its prefilled entry.
+
+For example, `jz_admin_seat` (in `example_progs/admin_seat.rs`): choose `0  Open(Vec<u8>)`, type a config, set `pda seed` to the same account as `account`, and `sign` to `y`. The seat checks the signature and passes the config to that account's PDA, which stores it once. The PDA then appears in the Accounts pane as `◇ … [PDA of jz_admin_seat]`; select it to see the stored config in the middle pane.
 
 **The prefilled entries.** The stock examples also list their ready-made `prog_cli` calls in the picker:
 

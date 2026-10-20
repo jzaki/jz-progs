@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, Focus, Modal},
+    app::{AccountRow, App, Focus, Modal},
     jobs::{StepState, short},
     rpc::{NATIVE_TOKEN, describe_bytes, format_balance},
 };
@@ -95,33 +95,45 @@ pub fn draw(frame: &mut Frame, app: &App) {
             );
         }
         Modal::Form(form) => {
-            let height = u16::try_from(form.fields.len()).unwrap_or(4) + 4;
-            let area = centered(frame.area(), 90, height);
-            frame.render_widget(Clear, area);
-            let width = form.fields.iter().map(|(label, _)| label.len()).max().unwrap_or(0);
-            let mut lines: Vec<Line> = form
+            // A label is a name, and optionally a description after a newline, drawn dimmed on
+            // its own line under the field so long text doesn't push every value right.
+            let split = |label: &str| -> (String, Option<String>) {
+                match label.split_once('\n') {
+                    Some((name, about)) => (name.to_owned(), Some(about.to_owned())),
+                    None => (label.to_owned(), None),
+                }
+            };
+            let width = form
                 .fields
                 .iter()
-                .enumerate()
-                .map(|(i, (label, value))| {
-                    let selected = i == form.selected;
-                    Line::from(vec![
-                        Span::styled(
-                            format!("{label:>width$}: "),
-                            Style::new().fg(Color::DarkGray),
-                        ),
-                        Span::styled(
-                            value.clone(),
-                            if selected {
-                                Style::new().fg(Color::Yellow)
-                            } else {
-                                Style::new()
-                            },
-                        ),
-                        Span::raw(if selected { "▏" } else { "" }),
-                    ])
-                })
-                .collect();
+                .map(|(label, _)| split(label).0.chars().count())
+                .max()
+                .unwrap_or(0);
+            let mut lines: Vec<Line> = Vec::new();
+            for (i, (label, value)) in form.fields.iter().enumerate() {
+                let selected = i == form.selected;
+                let (name, about) = split(label);
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{name:>width$}: "), Style::new().fg(Color::DarkGray)),
+                    Span::styled(
+                        value.clone(),
+                        if selected {
+                            Style::new().fg(Color::Yellow)
+                        } else {
+                            Style::new()
+                        },
+                    ),
+                    Span::raw(if selected { "▏" } else { "" }),
+                ]));
+                if let Some(about) = about {
+                    lines.push(
+                        Line::from(format!("{:width$}  {about}", "")).fg(Color::DarkGray).italic(),
+                    );
+                }
+            }
+            let height = u16::try_from(lines.len()).unwrap_or(8) + 4;
+            let area = centered(frame.area(), 90, height);
+            frame.render_widget(Clear, area);
             lines.push(Line::default());
             lines.push(
                 Line::from("Enter run · Tab/↑↓ field · Ctrl-U clear · Esc cancel").dark_gray(),
@@ -216,11 +228,31 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// An account's native balance, `off-chain`, or nothing before its view loads.
+fn chain_span(app: &App, id: &str) -> Span<'static> {
+    match app.views.get(id) {
+        Some(Some(view)) => Span::raw(format!(" {}", format_balance(view.balance()))).green(),
+        Some(None) => Span::raw(" off-chain").dark_gray(),
+        None => Span::raw(""),
+    }
+}
+
 fn draw_accounts(frame: &mut Frame, area: Rect, app: &App) {
     let items: Vec<ListItem> = app
-        .visible_accounts()
+        .account_rows()
         .into_iter()
-        .map(|account| {
+        .map(|row| {
+            let account = match row {
+                AccountRow::Wallet(account) => account,
+                AccountRow::Watched(watched) => {
+                    return ListItem::new(Line::from(vec![
+                        Span::raw("◇ ").magenta(),
+                        Span::raw(short(&watched.id)),
+                        Span::raw(format!(" [{}]", watched.note)).cyan(),
+                        chain_span(app, &watched.id),
+                    ]));
+                }
+            };
             let role = if app.saved.payer.as_deref() == Some(&account.id) {
                 Span::raw("★ ").yellow()
             } else if app.saved.account.as_deref() == Some(&account.id) {
@@ -229,12 +261,7 @@ fn draw_accounts(frame: &mut Frame, area: Rect, app: &App) {
                 Span::raw("  ")
             };
             let kind = if account.public { "" } else { "priv " };
-            let view = app.views.get(&account.id);
-            let chain = match view {
-                Some(Some(view)) => Span::raw(format!(" {}", format_balance(view.balance()))).green(),
-                Some(None) => Span::raw(" off-chain").dark_gray(),
-                None => Span::raw(""),
-            };
+            let chain = chain_span(app, &account.id);
             let label = account
                 .label
                 .as_deref()
@@ -313,7 +340,12 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let mut lines = Vec::new();
-    if let Some(account) = app.selected_account() {
+    if let Some(AccountRow::Watched(watched)) = app.selected_row() {
+        lines.push(Line::from(format!("Public/{}", watched.id)).bold());
+        lines.push(Line::from(format!("{} · watched, not in the wallet (x forgets it)", watched.note)).dark_gray());
+        lines.push(Line::default());
+        push_view(&mut lines, app, &watched.id);
+    } else if let Some(account) = app.selected_account() {
         let kind = if account.public { "Public" } else { "Private" };
         lines.push(Line::from(format!("{kind}/{}", account.id)).bold());
         let mut meta = Vec::new();
@@ -333,46 +365,10 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             lines.push(Line::from(meta.join(" · ")).dark_gray());
         }
         lines.push(Line::default());
-        match app.views.get(&account.id) {
-            _ if !account.public => {
-                lines.push(Line::from("private: its state isn't on the public chain").dark_gray());
-            }
-            None if !app.status.seq.healthy => {
-                lines.push(Line::from("sequencer not running").dark_gray());
-            }
-            None => lines.push(Line::from("loading…").dark_gray()),
-            Some(None) => {
-                lines.push(Line::from("not on chain").yellow());
-                lines.push(
-                    Line::from("A successful call creates it. If a call left it here, it reverted.")
-                        .dark_gray(),
-                );
-            }
-            Some(Some(view)) => {
-                lines.push(Line::from(format!(
-                    "nonce {} · balance {}",
-                    view.nonce,
-                    view.balance()
-                )));
-                lines.push(Line::default());
-                lines.push(Line::from("actor states").bold());
-                if view.actor_states.is_empty() {
-                    lines.push(Line::from("  (none)").dark_gray());
-                }
-                for (program, bytes) in &view.actor_states {
-                    lines.push(Line::from(vec![
-                        Span::raw("  "),
-                        Span::raw(app.program_label(program)).cyan(),
-                        Span::raw(format!("  {}  {} B", short(program), bytes.len())).dark_gray(),
-                    ]));
-                    let shown = if program == NATIVE_TOKEN {
-                        format!("balance {}", crate::rpc::decode_u128_le(bytes))
-                    } else {
-                        describe_bytes(bytes)
-                    };
-                    lines.push(Line::from(format!("    {shown}")));
-                }
-            }
+        if account.public {
+            push_view(&mut lines, app, &account.id);
+        } else {
+            lines.push(Line::from("private: its state isn't on the public chain").dark_gray());
         }
     } else {
         lines.push(Line::from("No accounts yet.").dark_gray());
@@ -384,6 +380,48 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             .block(pane("Account", false)),
         area,
     );
+}
+
+/// The chain view of a public account: nonce, balance and each actor state.
+fn push_view(lines: &mut Vec<Line<'static>>, app: &App, id: &str) {
+    match app.views.get(id) {
+        None if !app.status.seq.healthy => {
+            lines.push(Line::from("sequencer not running").dark_gray());
+        }
+        None => lines.push(Line::from("loading…").dark_gray()),
+        Some(None) => {
+            lines.push(Line::from("not on chain").yellow());
+            lines.push(
+                Line::from("A successful call creates it. If a call left it here, it reverted.")
+                    .dark_gray(),
+            );
+        }
+        Some(Some(view)) => {
+            lines.push(Line::from(format!(
+                "nonce {} · balance {}",
+                view.nonce,
+                view.balance()
+            )));
+            lines.push(Line::default());
+            lines.push(Line::from("actor states").bold());
+            if view.actor_states.is_empty() {
+                lines.push(Line::from("  (none)").dark_gray());
+            }
+            for (program, bytes) in &view.actor_states {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::raw(app.program_label(program)).cyan(),
+                    Span::raw(format!("  {}  {} B", short(program), bytes.len())).dark_gray(),
+                ]));
+                let shown = if program == NATIVE_TOKEN {
+                    format!("balance {}", crate::rpc::decode_u128_le(bytes))
+                } else {
+                    describe_bytes(bytes)
+                };
+                lines.push(Line::from(format!("    {shown}")));
+            }
+        }
+    }
 }
 
 fn draw_programs(frame: &mut Frame, area: Rect, app: &App) {
@@ -525,7 +563,7 @@ fn draw_checklist(frame: &mut Frame, area: Rect, app: &App) {
 
 fn draw_keys(frame: &mut Frame, area: Rect, app: &App) {
     let context = match app.focus {
-        Focus::Accounts => "P payer · A account · n new · t transfer",
+        Focus::Accounts => "P payer · A account · n new · t transfer · w watch · x forget watched",
         Focus::Guests => "v messages · d deploy · r stock runner · u build+deploy file",
         Focus::Deployments => "c call (pick message) · m move-data · v messages · x forget",
         Focus::Builtin => "read-only: details in the middle pane",
@@ -547,6 +585,7 @@ fn draw_help(frame: &mut Frame) {
         ("b", "build wallet, runners, prog_cli and the example guests"),
         ("i", "initialise the wallet and import the two funded test accounts"),
         ("n", "new public account"),
+        ("w / x", "watch an account outside the wallet (a PDA, say) / forget the selected one"),
         ("P / A", "make the selected account PAYER / ACCOUNT"),
         ("t", "native token transfer (wallet auth-transfer send), checked by both balances"),
         ("v", "the message types the selected guest or deployment accepts, read from its source"),

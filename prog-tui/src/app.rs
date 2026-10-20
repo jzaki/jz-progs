@@ -17,7 +17,7 @@ use crate::{
     msgtypes,
     rpc::{AccountView, Rpc},
     sequencer::{self, StopTarget},
-    state::{self, Deployment, Saved},
+    state::{self, Deployment, Saved, Watched},
     userprogs,
     wallet::WalletAccount,
 };
@@ -68,8 +68,10 @@ pub enum FormAction {
         subcommand: String,
         extra: Vec<String>,
     },
-    /// `prog_cli send`: fields `account`, one per param, then `sign`. The params are
-    /// Borsh-encoded by type into the message.
+    /// Watch an account outside the wallet: fields `id`, `note`.
+    Watch,
+    /// `prog_cli send`: fields `account`, one per param, then `also`, `pda seed` and `sign`. The
+    /// params are Borsh-encoded by type into the message.
     Send {
         program_id: String,
         index: Option<u8>,
@@ -109,6 +111,13 @@ pub enum Modal {
     Pick(Pick),
     Form(Form),
     Confirm(String, Confirmed),
+}
+
+/// One row of the Accounts pane: a wallet account, or a watched one such as a PDA.
+#[derive(Clone, Copy)]
+pub enum AccountRow<'a> {
+    Wallet(&'a WalletAccount),
+    Watched(&'a Watched),
 }
 
 pub struct App {
@@ -241,8 +250,32 @@ impl App {
             .collect()
     }
 
+    /// The Accounts pane's rows: the wallet's accounts, then the watched ones it doesn't hold.
+    pub fn account_rows(&self) -> Vec<AccountRow<'_>> {
+        let mut rows: Vec<AccountRow> = self
+            .visible_accounts()
+            .into_iter()
+            .map(AccountRow::Wallet)
+            .collect();
+        rows.extend(
+            self.saved
+                .watched
+                .iter()
+                .filter(|watched| !self.accounts.iter().any(|account| account.id == watched.id))
+                .map(AccountRow::Watched),
+        );
+        rows
+    }
+
+    pub fn selected_row(&self) -> Option<AccountRow<'_>> {
+        self.account_rows().get(self.selected_account).copied()
+    }
+
     pub fn selected_account(&self) -> Option<&WalletAccount> {
-        self.visible_accounts().get(self.selected_account).copied()
+        match self.selected_row()? {
+            AccountRow::Wallet(account) => Some(account),
+            AccountRow::Watched(_) => None,
+        }
     }
 
     pub fn program_label(&self, program_id: &str) -> String {
@@ -310,6 +343,7 @@ impl App {
                 .map(|account| account.id.clone())
                 .collect();
             ids.extend(self.saved.deployments.iter().map(|d| d.program_id.clone()));
+            ids.extend(self.saved.watched.iter().map(|watched| watched.id.clone()));
             // Engine programs have no account to look up; the others are deployed at genesis.
             ids.extend(
                 self.builtins
@@ -388,6 +422,13 @@ impl App {
                 self.saved.deployments.push(deployment);
                 self.save();
             }
+            Msg::Watch(id, note) => {
+                if self.saved.watch(id.clone(), note) {
+                    self.push_log(format!("watching {id} in the Accounts pane"));
+                    self.last_views = None;
+                }
+                self.save();
+            }
             Msg::ChainReset => {
                 self.saved.clear_chain();
                 self.accounts.clear();
@@ -411,7 +452,7 @@ impl App {
     }
 
     fn clamp_selection(&mut self) {
-        let accounts = self.visible_accounts().len();
+        let accounts = self.account_rows().len();
         self.selected_account = self.selected_account.min(accounts.saturating_sub(1));
         self.selected_guest = self
             .selected_guest
@@ -625,6 +666,28 @@ impl App {
             KeyCode::Char('d') => self.deploy_selected(),
             KeyCode::Char('r') => self.run_runner(),
             KeyCode::Char('v') => self.show_messages(),
+            KeyCode::Char('w') => {
+                self.modal = Modal::Form(Form::new(
+                    "Watch an account outside the wallet (shown in the Accounts pane)".to_owned(),
+                    vec![
+                        ("id".to_owned(), String::new()),
+                        ("note".to_owned(), String::new()),
+                    ],
+                    FormAction::Watch,
+                ));
+            }
+            KeyCode::Char('x') if self.focus == Focus::Accounts => {
+                match self.selected_row() {
+                    Some(AccountRow::Watched(watched)) => {
+                        let id = watched.id.clone();
+                        self.saved.watched.retain(|watched| watched.id != id);
+                        self.push_log(format!("stopped watching {id}"));
+                        self.save();
+                        self.clamp_selection();
+                    }
+                    _ => self.push_log("x forgets watched accounts only, not wallet accounts".to_owned()),
+                }
+            }
             KeyCode::Char('c') => self.open_pick(),
             KeyCode::Char('m') => self.open_call(true),
             KeyCode::Char('x')
@@ -650,7 +713,7 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        let visible = self.visible_accounts().len();
+        let visible = self.account_rows().len();
         let (selected, len) = match self.focus {
             Focus::Accounts => (&mut self.selected_account, visible),
             Focus::Guests => (&mut self.selected_guest, self.guests.len()),
@@ -699,6 +762,10 @@ impl App {
     fn set_role(&mut self, payer: bool) {
         if self.focus != Focus::Accounts {
             self.push_log("select an account in the Accounts pane first".to_owned());
+            return;
+        }
+        if matches!(self.selected_row(), Some(AccountRow::Watched(_))) {
+            self.push_log("✗ a watched account isn't in the wallet: it can't be PAYER or ACCOUNT".to_owned());
             return;
         }
         let Some(account) = self.selected_account().cloned() else {
@@ -1032,6 +1099,16 @@ impl App {
                     jobs::call(&mut ctx, &payer, &args).await.map(|_| ())
                 });
             }
+            FormAction::Watch => {
+                let id = jobs::bare_account_id(&values[0]).to_owned();
+                if bs58::decode(&id).into_vec().map_or(true, |bytes| bytes.len() != 32) {
+                    self.push_log(format!("✗ not a base58 account id: {id:?}"));
+                    self.modal = Modal::Form(form);
+                    return;
+                }
+                let note = if values[1].is_empty() { "watched".to_owned() } else { values[1].clone() };
+                self.on_msg(Msg::Watch(id, note));
+            }
             FormAction::Send {
                 ref program_id,
                 index,
@@ -1056,9 +1133,24 @@ impl App {
                         return;
                     }
                 };
-                let sign = values
-                    .last()
-                    .is_some_and(|sign| matches!(sign.as_str(), "y" | "yes" | "true"));
+                // After the params: `also`, `pda seed`, then `sign`.
+                let rest = &values[param_types.len() + 1..];
+                let also: Vec<String> = rest[0]
+                    .split(',')
+                    .map(|id| jobs::bare_account_id(id).to_owned())
+                    .filter(|id| !id.is_empty())
+                    .collect();
+                let pda_seed = jobs::bare_account_id(&rest[1]).to_owned();
+                // The program's actor on `account` is always declared, so naming it again does
+                // nothing. It's usually meant as the seed of that account's PDA.
+                if also.contains(&account) {
+                    self.push_log(
+                        "✗ `also` names the account itself, which is already declared. For the account's PDA, put it in `pda seed` instead".to_owned(),
+                    );
+                    self.modal = Modal::Form(form);
+                    return;
+                }
+                let sign = matches!(rest[2].as_str(), "y" | "yes" | "true");
                 if !self.prog_cli_ready() {
                     return;
                 }
@@ -1079,9 +1171,22 @@ impl App {
                 if sign {
                     args.push("--sign".to_owned());
                 }
+                for id in also {
+                    args.extend(["--also".to_owned(), id]);
+                }
+                let watch_pda = !pda_seed.is_empty();
+                if watch_pda {
+                    args.extend(["--pda-seed".to_owned(), pda_seed]);
+                }
                 let name = form.title.split(':').next().unwrap_or("send").to_owned();
+                let note = format!("PDA of {name}");
                 self.spawn_job(&format!("send to {name}"), move |mut ctx| async move {
-                    jobs::call(&mut ctx, &payer, &args).await.map(|_| ())
+                    let called = jobs::call(&mut ctx, &payer, &args).await?;
+                    // With a PDA seed, the target is the PDA: show it in the Accounts pane.
+                    if let (true, Some(pda)) = (watch_pda, called.account) {
+                        ctx.send(Msg::Watch(pda, note));
+                    }
+                    Ok(())
                 });
             }
         }
@@ -1089,13 +1194,14 @@ impl App {
 }
 
 /// The form for one message: the account, each param (prefilled with `ACCOUNT` for an account
-/// id), and whether `account` signs.
+/// id), more of the program's actors to declare (`--also`, `--pda-seed`), and whether `account`
+/// signs.
 fn send_form(saved: &Saved, deployment: &Deployment, method: msgtypes::Method) -> Form {
     let account = saved.account.clone().unwrap_or_default();
     let mut fields = vec![("account".to_owned(), account.clone())];
     for (i, param) in method.params.iter().enumerate() {
         let name = param.name.clone().unwrap_or_else(|| format!("#{i}"));
-        let label = format!("{name}: {} ({})", param.ty, msgtypes::hint(&param.ty));
+        let label = format!("{name}: {}\n{}", param.ty, msgtypes::hint(&param.ty));
         let value = if param.ty.ends_with("AccountId") {
             account.clone()
         } else {
@@ -1103,9 +1209,21 @@ fn send_form(saved: &Saved, deployment: &Deployment, method: msgtypes::Method) -
         };
         fields.push((label, value));
     }
-    fields.push(("sign (y/n)".to_owned(), "n".to_owned()));
+    let params = method.params.len();
+    fields.push((
+        "also\noptional: other accounts this program's actor runs on, comma-separated".to_owned(),
+        String::new(),
+    ));
+    fields.push((
+        "pda seed\noptional: declare this program's PDA for a seed: an account id, or 0x hex".to_owned(),
+        String::new(),
+    ));
+    fields.push((
+        "sign\ny: the account signs, for handlers that check is_authorized".to_owned(),
+        "n".to_owned(),
+    ));
     let param_types = method.params.iter().map(|p| p.ty.clone()).collect();
-    Form::new(
+    let mut form = Form::new(
         format!("{}: {} → prog_cli send", deployment.name, method.label.trim()),
         fields,
         FormAction::Send {
@@ -1113,7 +1231,13 @@ fn send_form(saved: &Saved, deployment: &Deployment, method: msgtypes::Method) -
             index: method.index,
             param_types,
         },
-    )
+    );
+    // Start on the first empty param, not on an optional field.
+    form.selected = form.fields[1..=params]
+        .iter()
+        .position(|(_, value)| value.is_empty())
+        .map_or(0, |i| i + 1);
+    form
 }
 
 fn stop_note(stop: Option<StopTarget>) -> String {
