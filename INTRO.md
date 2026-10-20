@@ -13,7 +13,7 @@ Sources:
 - `logos-blockchain/logos-execution-zone` on `dev` (checked at `e2913677b`, 2026-10-14) for v0.4, run from branch `jzaki/fix-examples` (`be940d8f8`, which adds runner fixes on top of `e2913677b`), and tags **v0.2.4** and **v0.3.0** for the older sections. `../logos-execution-zone` is the local checkout. Files used: `Justfile`, `flake.nix`, `rust-toolchain.toml`, `examples/program_deployment/`, `lez/wallet/`, `lez/programs/`.
 - `logos-co/logos-docs` [Journey] issues #506–#511 and #514, the LEZ developers' notes for testnet v0.3. Issue numbers like `#514` refer to these, and LEZ PRs are written "PR 875".
 - `logos-co/logos-docs` branch `docs/zone-endpoint-ref`, file `docs/get-started/testnet-endpoints.md` (commit `de03a2b0`, unmerged at the time of writing, so it may move): the RPC, explorer, release and channel for each testnet. Section 1 copies the rows used here. If they differ, that page wins.
-- The actor-model manual on LEZ branch `schouhy/lez-guide-mdbook` (`docs/actor-program-development-book/`). Section 4 links to it instead of repeating it.
+- The actor-model manual on LEZ branch `moudy/guide-mdbook-fixes` (`docs/actor-program-development-book/`; first written on `schouhy/lez-guide-mdbook`). Section 4 links to it instead of repeating it.
 
 **What is referenced.** The v0.4 steps are written from the code and its `--help` text. [MODEL_CHANGES.md](MODEL_CHANGES.md) explains the v0.3.0 model in detail, and [GUIDE_v0.2_v0.4.md](GUIDE_v0.2_v0.4.md) covers porting from v0.2 to v0.4.
 
@@ -272,7 +272,7 @@ fn handle_message(input: &ReceiveInput, greeting: Vec<u8>) -> Response {
 
 Hello world never checks `is_authorized`, so anyone can append to its state on any account. That is harmless: the program cannot touch the balance or any other program's state. `hello_world_with_authorization.rs` adds the check.
 
-For what `ReceiveInput` and `Response` contain, and how sync and async messages differ, read the manual (`docs/actor-program-development-book/` on branch `schouhy/lez-guide-mdbook`): `foundations/messages.md` and `reference/api.md`. Its names are one rename behind `dev`: where it says `Call` and `Cast`, `dev` has `SyncMessage` and `AsyncMessage` ([the name map](GUIDE_v0.2_v0.4.md#read-this-next-to-the-actor-model-manual)). Its `foundations/toolchain.md` also covers testing a handler without a chain.
+For what `ReceiveInput` and `Response` contain, and how sync and async messages differ, read the manual (`docs/actor-program-development-book/` on branch `moudy/guide-mdbook-fixes`): `foundations/messages.md` and `reference/api.md`. Its names are one rename behind `dev`: where it says `Call` and `Cast`, `dev` has `SyncMessage` and `AsyncMessage` ([the name map](GUIDE_v0.2_v0.4.md#read-this-next-to-the-actor-model-manual)). Its `foundations/toolchain.md` also covers testing a handler without a chain.
 
 ### Run it locally
 
@@ -338,6 +338,7 @@ just run-wallet program-loader deploy --elf "$BIN/hello_world.bin" \
 - **hello_world needs three segments.** The segment count is the size of the `.bin`'s `user_elf` divided by 96 KiB (`MAX_SEGMENT_DATA_LEN`), rounded up. It is not based on the whole `.bin`. `hello_world.bin` (305,616 bytes, tried on 2026-10-16) needs 3.
 - **The count must match exactly.** If it doesn't, the deploy fails before sending anything, with `Program bytecode splits into N segment(s) but M were supplied`. Create N segment accounts and run the deploy again, passing them in order.
 - **Done looks like** `Program deployed. Header account id: <hdr id>`.
+- **A deploy that fails partway can't be resumed** over the same accounts. Create a fresh header and segments and deploy again.
 
 The `--immutable` flag marks the program as immutable (not enforced by the protocol). The runner's `deploy_program` passes it, so a runner-deployed program is immutable. Run `wallet program-loader deploy --help` for the exact argument form. `examples/program_deployment/README.md` still says `wallet deploy-program`, which no longer exists.
 
@@ -433,4 +434,4 @@ For emitting events, the model is `lez/programs/bridge` (#507).
 
 ### Programs removed from `dev`
 
-At v0.3.0, `lez/programs/` also held `token`, `amm` and `associated_token_account` (docs: trade tokens, liquidity pool pages). They are not on `dev`. The other built-ins and the test programs are listed in section 5.
+At v0.3.0, `lez/programs/` also held `token`, `amm` and `associated_token_account` (docs: trade tokens, liquidity pool pages). They are not in the LEZ repo on `dev`: they moved to `logos-blockchain/lez-programs`. The other built-ins and the test programs are listed in section 5.

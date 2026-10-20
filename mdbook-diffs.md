@@ -1,6 +1,6 @@
 # The two mdbooks: plan/apply vs actor model
 
-schouhy's LEZ manual exists in two copies on LEZ branch [`schouhy/lez-guide-mdbook`](https://github.com/logos-blockchain/logos-execution-zone/tree/schouhy/lez-guide-mdbook/docs) (local copy: `schouhy-docs/`):
+schouhy's LEZ manual exists in two copies, first on LEZ branch `schouhy/lez-guide-mdbook` and now with fixes on [`moudy/guide-mdbook-fixes`](https://github.com/logos-blockchain/logos-execution-zone/tree/moudy/guide-mdbook-fixes/docs) (local copy: `moudy_guide-mdbook-fixes_latest/`):
 
 | Book | Model | Written against |
 |---|---|---|
@@ -162,4 +162,14 @@ The book is written against PR 935 at `faaa07251`, which is not an ancestor of `
 
 `from_own_program`, `write_once`, `blinded`, `RecoveryBinding`, `wallet pending` and `wallet group` are on `dev` under the book's names.
 
-The book's "shipped token" (`lez/programs/token`, its `EnsureHolding` repair message and the `notify` hook) and the AMM and ATA programs are **not on `dev`**. They were removed there in `c16cf3000` ("more removals"). `dev` ships `wrapped_token` instead. Treat the book's references to them as describing the PR branch, not `dev`.
+The book's "shipped token" (with its `EnsureHolding` repair message and the `notify` hook) and the AMM and ATA programs are **not in the LEZ repo on `dev`**. They left it in `c16cf3000` ("more removals") and moved to their own repo, `logos-blockchain/lez-programs` (`programs/token`, `programs/ata`, `programs/amm`), from which testnet deploys them. The fixed book points there. `dev` itself ships `wrapped_token`.
+
+## Fixes on `moudy/guide-mdbook-fixes`
+
+That branch corrects both books against the code. The actor book has three changes:
+
+- **Deploying.** `wallet program-loader deploy` takes no positional path: it's `--elf <bin> --header <account> --segments <account>... [--immutable]`. The header and segment accounts must exist first, with empty `program_loader` state, one segment account per 96 KiB of the user ELF (`MAX_SEGMENT_DATA_LEN`). A wrong count fails with `SegmentCountMismatch`. A deploy that fails partway can't be resumed over the same accounts. [INTRO.md](INTRO.md) section 4 already had the first part.
+- **Token paths.** `lez/programs/token` becomes `logos-blockchain/lez-programs: programs/token` (see above).
+- **Core crates.** The example of a separate `core` crate for message types is now `lez/programs/clock/core`, plus the token's in `lez-programs`.
+
+The plan/apply book's fixes are smaller and matter only for v0.3: the token, ATA and AMM paths moved to `lez-programs` (and `amm_prepared_offers.rs` is gone; the state tests in `lee/state_machine/src/state/tests/privacy_preserving.rs` show the same property), the same deploy CLI, `Message::try_new_with_fees` with a `FeeDeclaration`, `Identifier` is 32 bytes (not `u128`), a view tag is key-derived only on `Init`, `env::log` is always compiled, proof tests aren't feature-gated (`RISC0_DEV_MODE=1` makes them cheap), and `wallet account get --scope` takes `balance`, `all` or a program account id.

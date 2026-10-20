@@ -9,7 +9,7 @@ A porting guide for developers who have a Logos Execution Zone (LEZ) program wri
 
 ## Read this next to the actor-model manual
 
-The manual is `docs/actor-program-development-book/` on LEZ branch **`schouhy/lez-guide-mdbook`** ([browse](https://github.com/logos-blockchain/logos-execution-zone/tree/schouhy/lez-guide-mdbook/docs/actor-program-development-book/src); build it with `mdbook`). This guide links to it by chapter and does not repeat it. The chapters you will use most:
+The manual is `docs/actor-program-development-book/` on LEZ branch **`moudy/guide-mdbook-fixes`**, which fixes schouhy's `schouhy/lez-guide-mdbook` ([browse](https://github.com/logos-blockchain/logos-execution-zone/tree/moudy/guide-mdbook-fixes/docs/actor-program-development-book/src); build it with `mdbook`). This guide links to it by chapter and does not repeat it. The chapters you will use most:
 
 | Topic | Chapter |
 |---|---|
