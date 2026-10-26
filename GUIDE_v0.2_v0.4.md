@@ -111,7 +111,7 @@ The manual covers the rest. Read `foundations/authorization.md` ("Knowing who se
 - **Reverts cost money.** A failed transaction is included and charged, and only the nonce advances. Fail early, and simulate before you submit.
 - **There is no faucet.** Deploys and every user call need a funded, signing payer.
 - **Two things in the repo still describe the old flow.** `examples/program_deployment/README.md` says `wallet deploy-program`, which is now `wallet program-loader deploy`. The example runners build calls with `Message::try_new` and no fee, which `dev` rejects as `MissingFeeDeclaration`. [INTRO.md](INTRO.md) section 4 has the working steps.
-- **Tooling.** SPEL and scaffold targeted the older models. I found no actor-model support for them on `dev`, and I haven't checked their repos.
+- **Tooling.** SPEL targets LEZ `v0.2.5-rc2`, a `dev` release candidate from before v0.3, and has no actor-model support. [SPEL.md](SPEL.md) describes it as it is. Every scaffold release pins LEZ `v0.1.2`, and its open PRs move it to v0.2.4 or v0.3.1, not v0.4. [SCAFFOLD.md](SCAFFOLD.md) describes it.
 
 ## 6. Common patterns, before and after
 
@@ -262,5 +262,5 @@ There was no v0.2 equivalent. Use `Response::…event(ProgramEvent { selector, d
 
 1. **Limits.** I found no call-depth or message-count constant in the engine on `dev`. v0.3 capped chained calls at 10. Execution is metered by gas, so a limit may now be gas rather than depth. Confirm with the LEZ team.
 2. **Token, AMM and ATA.** They were removed from `dev` (commit `c16cf3000`). Ask whether they return as actor programs, and when. Until then, custom tokens are yours to write.
-3. **Tooling.** When will SPEL and scaffold target the actor model?
+3. **Tooling.** When will SPEL and scaffold target the actor model? [SPEL.md](SPEL.md) section 7 maps SPEL's features onto v0.4, and [SCAFFOLD.md](SCAFFOLD.md) section 7 does the same for scaffold.
 4. **Names.** The manual and `dev` can still drift. Check `lee/state_machine/core/src/program/mod.rs` for the current names before you copy code from either.
