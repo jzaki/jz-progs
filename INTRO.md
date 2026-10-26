@@ -362,6 +362,26 @@ What to design around, such as authorization, who sent a message, stored message
 - **Async messages** are delivered later if the receiver can't be run in this transaction. Native credits to private accounts work this way, and the recipient collects them with `wallet pending list` and `wallet pending receive --position N`.
 - **PDAs.** `tail_call_with_pda.rs` shows a program authorizing an account it controls with `SyncMessage::new(..).with_pda_seeds(..)`.
 
+### Public vs private recipients
+
+Whether a message to an actor runs now or is stored for later depends on whether the transaction *declares* that actor. Nothing in the LEZ repo's prose docs covers this. The rules below are read from the engine (`lee/state_machine/core/src/execution_state.rs`, `deliver`), and the `simple_token` result at the end was observed on a local sequencer.
+
+**A public recipient must be declared, and admitted.**
+- **Declared:** list the actor in the transaction's actors. `prog_cli send --also <account>` does this, and so does the wallet for the recipient of a native transfer. A declared public actor runs in this transaction, even when the message that reaches it is async.
+- **Admitted:** its account must already be on chain, or sign, or carry `PublicAccountEvidence` in the transaction (`Key` for a keypair account, `Pda { program, seed }` for a PDA). Otherwise: `UnadmittedPublicActor`. `prog_cli` adds `Key` evidence for any fresh account whose key is in your wallet. A fresh account you hold no key for can't be admitted that way.
+
+**A private recipient must not be declared.**
+- A destination that isn't a declared public actor is treated as private. If it *is* declared, it's rejected as `UndeclaredActor`.
+- The message is then published as an encrypted note, which needs a **recovery binding** for the destination address (`RecoveryBinding`, in `lee/state_machine/core/src/recovery.rs`). The binding is an encrypted note that lets the key owner recover the blinded address. It must already be in chain state, or be introduced by this transaction. Otherwise: `UnboundAsyncDestination`.
+- The recipient collects the message later with `wallet pending list` and `wallet pending receive --position N`.
+- The sequencer does this for private bridge deposits: the address is left undeclared so the credit is published under its recovery binding (`lez/sequencer/core/src/lib.rs`, `Credited::Private`).
+
+**Shielding isn't the answer to either.** Shielding moves a public balance into a private account. Receiving a message at a private address needs only the recovery binding.
+
+**An undeclared fresh public recipient fails the same way as a private one with no binding.** It is routed down the private path and finds no binding, so the call reverts. A reverted call is still included and charged, and the reason appears only in the sequencer log, if at all. In prog-tui this shows as "unchanged".
+
+**Observed with `example_progs/simple_token.rs`:** a `Transfer` or `Mint` to a fresh public account reverted without `--also <recipient>` and succeeded with it. The exact error wasn't read from the log. The `UnboundAsyncDestination` reading above is inferred from the code, not confirmed. Sending to a private holder was **not tested**.
+
 ---
 
 ## 5. Example programs to read
