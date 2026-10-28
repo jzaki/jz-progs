@@ -1,0 +1,29 @@
+[package]
+name = "lez-dryrun"
+version = "0.1.0"
+edition = "2024"
+description = "Plan a LEZ public call by running it locally against chain state: the actors, signers and evidence it needs"
+publish = false
+
+# Its own workspace: it builds against a LEZ checkout next to jz-progs, by path.
+[workspace]
+
+[dependencies]
+lee = { path = "../../logos-execution-zone/lee/state_machine" }
+lee_core = { path = "../../logos-execution-zone/lee/state_machine/core", features = ["host"] }
+program_loader_core = { path = "../../logos-execution-zone/lez/programs/program_loader/core" }
+sequencer_service_rpc = { path = "../../logos-execution-zone/lez/sequencer/service/rpc", features = ["client"] }
+
+anyhow = "1.0.98"
+borsh = "1.5.7"
+clap = { version = "4.5.42", features = ["derive"] }
+hex = "0.4.3"
+risc0-binfmt = "3.0.2"
+risc0-zkvm = { version = "3.0.5", default-features = false, features = ["std", "client"] }
+serde = { version = "1.0.60", features = ["derive"] }
+serde_json = "1.0.81"
+tokio = { version = "1.50", features = ["rt"] }
+
+# As LEZ's: an unoptimized executor runs guests slowly.
+[profile.dev]
+opt-level = 1

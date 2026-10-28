@@ -78,14 +78,6 @@ impl Saved {
         Ok(())
     }
 
-    /// The most recent live deployment of `name`.
-    pub fn latest(&self, name: &str) -> Option<&Deployment> {
-        self.deployments
-            .iter()
-            .rev()
-            .find(|deployment| deployment.name == name && !deployment.stale)
-    }
-
     pub fn program_name(&self, program_id: &str) -> Option<&str> {
         self.deployments
             .iter()
@@ -152,6 +144,8 @@ pub fn env_sh(saved: &Saved, lez: &Lez) -> String {
         &lez.wallet_home().display().to_string(),
     );
     export("LEE_WALLET_PASSWORD", &saved.wallet_password);
+    // `lez-call call` runs this wallet.
+    export("LEZ_WALLET", &lez.release_bin("wallet").display().to_string());
     export("BIN", &lez.bin_dir().display().to_string());
     if let Some(payer) = &saved.payer {
         export("PAYER", payer);
@@ -196,6 +190,7 @@ mod tests {
         let script = env_sh(&saved, &lez);
         assert!(script.contains("export LEZ_DIR='/x/it'\\''s'\n"));
         assert!(script.contains("export LEE_WALLET_PASSWORD='prog-tui'\n"));
+        assert!(script.contains("export LEZ_WALLET='/x/it'\\''s/target/release/wallet'\n"));
         assert!(script.contains("export PAYER='PAY'\n"));
         assert!(!script.contains("ACCOUNT="));
         assert!(script.contains("export PROGRAM_HELLO_WORLD='NEW'\n"));
@@ -216,21 +211,5 @@ mod tests {
         );
         saved.clear_chain();
         assert!(saved.watched.is_empty());
-    }
-
-    #[test]
-    fn latest_skips_stale() {
-        let mut saved = Saved::default();
-        saved.deployments.push(Deployment {
-            name: "a".into(),
-            program_id: "1".into(),
-            stale: false,
-        });
-        saved.deployments.push(Deployment {
-            name: "a".into(),
-            program_id: "2".into(),
-            stale: true,
-        });
-        assert_eq!(saved.latest("a").map(|d| d.program_id.as_str()), Some("1"));
     }
 }

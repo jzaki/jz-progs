@@ -291,7 +291,7 @@ just run-wallet account new public       # the account hello_world writes to
 ACCOUNT=<account id printed above>
 ```
 
-**The wallet password encrypts the wallet's storage** (`storage.json`). It is no longer a key seed: the keys come from the mnemonic the wallet prints. Leave it empty to keep the storage unencrypted, as before. With a non-empty one, every later wallet command, runner and `prog_cli` call asks for it on the terminal, or reads it from `LEE_WALLET_PASSWORD`. So for this walkthrough, either press Enter twice, or `export LEE_WALLET_PASSWORD=<password>` before `check-health` (then it doesn't ask at all). `wallet set-password` changes it later.
+**The wallet password encrypts the wallet's storage** (`storage.json`). It is no longer a key seed: the keys come from the mnemonic the wallet prints. Leave it empty to keep the storage unencrypted, as before. With a non-empty one, every later wallet command, runner and `lez-call` call asks for it on the terminal, or reads it from `LEE_WALLET_PASSWORD`. So for this walkthrough, either press Enter twice, or `export LEE_WALLET_PASSWORD=<password>` before `check-health` (then it doesn't ask at all). `wallet set-password` changes it later.
 
 Then build the guests (section 1) and run the hello-world runner. It deploys the program through the program loader, so there is no separate deploy step:
 
@@ -369,8 +369,8 @@ What to design around, such as authorization, who sent a message, stored message
 Whether a message to an actor runs now or is stored for later depends on whether the transaction *declares* that actor. Nothing in the LEZ repo's prose docs covers this. The rules below are read from the engine (`lee/state_machine/core/src/execution_state.rs`, `deliver`), and the `simple_token` result at the end was observed on a local sequencer.
 
 **A public recipient must be declared, and admitted.**
-- **Declared:** list the actor in the transaction's actors. `prog_cli send --also <account>` does this, and so does the wallet for the recipient of a native transfer. A declared public actor runs in this transaction, even when the message that reaches it is async.
-- **Admitted:** its account must already be on chain, or sign, or carry `PublicAccountEvidence` in the transaction (`Key` for a keypair account, `Pda { program, seed }` for a PDA). Otherwise: `UnadmittedPublicActor`. `prog_cli` adds `Key` evidence for any fresh account whose key is in your wallet. A fresh account you hold no key for can't be admitted that way.
+- **Declared:** list the actor in the transaction's actors. `lez-dryrun` declares each actor its dry run finds a message reaching (`--actor <account>` declares one yourself), and the wallet does it for the recipient of a native transfer. A declared public actor runs in this transaction, even when the message that reaches it is async.
+- **Admitted:** its account must already be on chain, or sign, or carry `PublicAccountEvidence` in the transaction (`Key` for a keypair account, `Pda { program, seed }` for a PDA). Otherwise: `UnadmittedPublicActor`. The wallet adds `Key` evidence for any fresh account whose key it holds. A fresh account you hold no key for is admitted only by its public key (`wallet program call … --actor pk:<hex>`).
 
 **A private recipient must not be declared.**
 - A destination that isn't a declared public actor is treated as private. If it *is* declared, it's rejected as `UndeclaredActor`.

@@ -1,6 +1,7 @@
 //! UI state and key handling. Long work goes to [`crate::jobs`]; results come back as [`Msg`]s.
 
 use std::{
+    cell::Cell,
     collections::{BTreeMap, VecDeque},
     future::Future,
     path::PathBuf,
@@ -12,9 +13,10 @@ use tokio::{runtime::Handle, sync::mpsc::UnboundedSender};
 
 use crate::{
     builtin::{self, Builtin},
-    jobs::{self, Ctx, Msg, Status, StepState},
+    jobs::{self, CallRequest, Ctx, Msg, PlannedCall, Status, StepState},
     lez::Lez,
-    msgtypes,
+    lez_call::{self, Method, Seed},
+    tools::LEZ_CALL,
     rpc::{AccountView, Rpc},
     sequencer::{self, StopTarget},
     state::{self, Deployment, Saved, Watched},
@@ -34,7 +36,7 @@ pub enum Focus {
 
 pub struct Form {
     pub title: String,
-    /// `(label, value)`. For a call, each label is also the `prog_cli` flag.
+    /// `(label, value)`. A label is a name, then optionally a description after a newline.
     pub fields: Vec<(String, String)>,
     pub selected: usize,
     pub action: FormAction,
@@ -63,19 +65,18 @@ pub enum FormAction {
     /// Build and deploy a guest source file: field `file`.
     BuildDeploy,
     LezDir,
-    /// `prog_cli <subcommand> --<label> <value>… <extra>…`
-    Call {
-        subcommand: String,
-        extra: Vec<String>,
-    },
     /// Watch an account outside the wallet: fields `id`, `note`.
     Watch,
-    /// `prog_cli send`: fields `account`, one per param, then `also`, `pda seed` and `sign`. The
-    /// params are Borsh-encoded by type into the message.
-    Send {
+    /// Plan one message: fields `to`, one per param, then `sign`, `actors` and `pda seeds`.
+    /// `single`: the program takes one message type, so it's given no name.
+    Plan {
         program_id: String,
-        index: Option<u8>,
-        param_types: Vec<String>,
+        name: String,
+        method: Method,
+        single: bool,
+        /// The guest's source, for `lez-call`.
+        source: PathBuf,
+        seeds: Vec<Seed>,
     },
 }
 
@@ -87,13 +88,24 @@ pub struct Pick {
 }
 
 pub enum PickAction {
-    /// Ask for this message's params, then `prog_cli send` it.
+    /// Ask for this message's params, then plan it.
     Method {
         deployment: Deployment,
-        method: msgtypes::Method,
+        method: Method,
+        single: bool,
+        source: PathBuf,
+        /// The source's `PdaSeed` constants.
+        seeds: Vec<Seed>,
     },
-    /// A ready-made call form for one of the stock examples.
-    Prefilled(Form),
+}
+
+/// A call's plan on screen: Enter sends it with `wallet program call`, when it can be sent.
+pub struct PlanView {
+    pub title: String,
+    pub lines: Vec<String>,
+    pub call: Option<PlannedCall>,
+    /// The first line shown. The drawing clamps it to what fits, so it's a `Cell`.
+    pub scroll: Cell<u16>,
 }
 
 #[derive(Clone, Copy)]
@@ -110,6 +122,7 @@ pub enum Modal {
     Text(String, Vec<String>),
     Pick(Pick),
     Form(Form),
+    Plan(PlanView),
     Confirm(String, Confirmed),
 }
 
@@ -423,6 +436,14 @@ impl App {
                 self.saved.deployments.push(deployment);
                 self.save();
             }
+            Msg::Plan { title, lines, call } => {
+                self.modal = Modal::Plan(PlanView {
+                    title,
+                    lines,
+                    call,
+                    scroll: Cell::new(0),
+                });
+            }
             Msg::Watch(id, note) => {
                 if self.saved.watch(id.clone(), note) {
                     self.push_log(format!("watching {id} in the Accounts pane"));
@@ -522,16 +543,16 @@ impl App {
         value.cloned()
     }
 
-    fn prog_cli_ready(&mut self) -> bool {
-        if self.lez.release_bin("prog_cli").is_file() {
+    fn lez_call_ready(&mut self) -> bool {
+        if LEZ_CALL.path().is_some() {
             return true;
         }
-        if self.lez.prog_cli_src().is_file() {
-            self.push_log("✗ prog_cli isn't built yet (key b)".to_owned());
+        if LEZ_CALL.has_checkout() {
+            self.push_log("✗ lez-call isn't built yet (key b)".to_owned());
         } else {
             self.push_log(format!(
-                "✗ {} has no examples/program_deployment/src/bin/prog_cli.rs: deploy/call need it; key r runs the stock runners",
-                self.lez.dir.display()
+                "✗ no lez-call: check it out at {} or put it on PATH; key r runs the stock runners",
+                LEZ_CALL.checkout().display()
             ));
         }
         false
@@ -556,7 +577,30 @@ impl App {
             }
             Modal::Pick(pick) => self.on_pick_key(pick, key),
             Modal::Form(form) => self.on_form_key(form, key),
+            Modal::Plan(view) => self.on_plan_key(view, key),
         }
+    }
+
+    fn on_plan_key(&mut self, view: PlanView, key: KeyEvent) {
+        let scroll = view.scroll.get();
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => view.scroll.set(scroll.saturating_add(1)),
+            KeyCode::Up | KeyCode::Char('k') => view.scroll.set(scroll.saturating_sub(1)),
+            KeyCode::PageDown | KeyCode::Char(' ') => view.scroll.set(scroll.saturating_add(8)),
+            KeyCode::PageUp => view.scroll.set(scroll.saturating_sub(8)),
+            KeyCode::Home | KeyCode::Char('g') => view.scroll.set(0),
+            KeyCode::End | KeyCode::Char('G') => view.scroll.set(u16::MAX),
+            KeyCode::Enter | KeyCode::Char('y') => {
+                if let Some(call) = view.call {
+                    self.spawn_job(&format!("call {}", call.name), move |mut ctx| async move {
+                        jobs::call(&mut ctx, &call).await
+                    });
+                }
+                return;
+            }
+            _ => return,
+        }
+        self.modal = Modal::Plan(view);
     }
 
     fn on_pick_key(&mut self, mut pick: Pick, key: KeyEvent) {
@@ -573,10 +617,13 @@ impl App {
                 if pick.selected < pick.options.len() {
                     let (_, action) = pick.options.swap_remove(pick.selected);
                     self.modal = Modal::Form(match action {
-                        PickAction::Prefilled(form) => form,
-                        PickAction::Method { deployment, method } => {
-                            send_form(&self.saved, &deployment, method)
-                        }
+                        PickAction::Method {
+                            deployment,
+                            method,
+                            single,
+                            source,
+                            seeds,
+                        } => send_form(&self.saved, &deployment, method, single, source, seeds),
                     });
                 }
                 return;
@@ -588,7 +635,7 @@ impl App {
 
     fn on_main_key(&mut self, key: KeyEvent) {
         if self.focus == Focus::Builtin
-            && matches!(key.code, KeyCode::Char('d' | 'r' | 'c' | 'm' | 'x'))
+            && matches!(key.code, KeyCode::Char('d' | 'r' | 'c' | 'x'))
         {
             self.push_log("built-in programs are read-only: you can't deploy, call or forget them".to_owned());
             return;
@@ -690,7 +737,6 @@ impl App {
                 }
             }
             KeyCode::Char('c') => self.open_pick(),
-            KeyCode::Char('m') => self.open_call(true),
             KeyCode::Char('x')
                 if self.focus == Focus::Deployments
                     && self.selected_deployment < self.saved.deployments.len() =>
@@ -817,9 +863,6 @@ impl App {
         let Some(guest) = self.guests.get(self.selected_guest).cloned() else {
             return;
         };
-        if !self.prog_cli_ready() {
-            return;
-        }
         let Some(payer) = self.need("PAYER (key P)", self.saved.payer.clone().as_ref()) else {
             return;
         };
@@ -893,44 +936,54 @@ impl App {
         });
     }
 
-    /// The message types the selected guest (or deployment) accepts, read from its source in the
-    /// guest package's `src/bin/`.
+    /// The messages the selected guest (or deployment) accepts: `lez-call iface`, which reads its
+    /// source.
     fn show_messages(&mut self) {
-        let guest = match self.focus {
-            Focus::Guests => self.guests.get(self.selected_guest).cloned(),
+        let source = match self.focus {
+            Focus::Guests => self
+                .guests
+                .get(self.selected_guest)
+                .map(|guest| Ok(lez_call::source_of(&self.lez, guest))),
             Focus::Deployments => self
                 .saved
                 .deployments
                 .get(self.selected_deployment)
-                .map(|deployment| deployment.name.clone()),
+                .map(|deployment| self.source(deployment)),
             _ => None,
         };
-        let Some(guest) = guest else {
+        let Some(source) = source else {
             self.push_log("select a guest or deployment in the Programs pane to see its messages".to_owned());
             return;
         };
-        match self.guest_interface(&guest) {
-            Ok((source, interface)) => {
-                let mut lines = vec![source.display().to_string(), String::new()];
-                lines.extend(interface.lines());
-                self.modal = Modal::Text(format!("{guest}: messages"), lines);
+        if !self.lez_call_ready() {
+            return;
+        }
+        let result = source.and_then(|source| {
+            let lines = lez_call::text(&self.lez, &self.saved.wallet_password, &source)?;
+            Ok((source, lines))
+        });
+        match result {
+            Ok((source, lines)) => {
+                let name = source.file_stem().map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
+                self.modal = Modal::Text(format!("{name}: messages"), lines);
             }
-            Err(error) => self.push_log(format!("✗ {guest}: {error:#}")),
+            Err(error) => self.push_log(format!("✗ {error:#}")),
         }
     }
 
-    /// A guest's source in the guest package's `src/bin/`, parsed for its messages.
-    fn guest_interface(&self, guest: &str) -> anyhow::Result<(PathBuf, msgtypes::Interface)> {
-        let source = self.lez.guest_src_dir().join(format!("{guest}.rs"));
-        let text = std::fs::read_to_string(&source)
-            .map_err(|error| anyhow::anyhow!("{}: {error}", source.display()))?;
-        let interface =
-            msgtypes::parse(&text).map_err(|error| anyhow::anyhow!("{}: {error}", source.display()))?;
-        Ok((source, interface))
+    /// The source `lez-call` reads for a deployment: its guest's, by name, when there is one;
+    /// else the guest whose build has the image id in the program's header (`lez-dryrun
+    /// source-of`).
+    fn source(&self, deployment: &Deployment) -> anyhow::Result<PathBuf> {
+        let source = lez_call::source_of(&self.lez, &deployment.name);
+        if source.is_file() {
+            return Ok(source);
+        }
+        let guest = lez_call::guest_of(&self.lez, &deployment.program_id)?;
+        Ok(lez_call::source_of(&self.lez, &guest))
     }
 
-    /// `c`: pick one of the deployment's messages, read from its source, or a stock example's
-    /// prefilled call.
+    /// `c`: pick one of the deployment's messages, from `lez-call iface`.
     fn open_pick(&mut self) {
         if self.focus != Focus::Deployments {
             self.push_log("select a deployment in the Programs pane to call it".to_owned());
@@ -939,54 +992,48 @@ impl App {
         let Some(deployment) = self.saved.deployments.get(self.selected_deployment).cloned() else {
             return;
         };
-        let mut options: Vec<(String, PickAction)> = Vec::new();
-        match self.guest_interface(&deployment.name) {
-            Ok((_, interface)) => {
-                for method in interface.methods() {
-                    let action = PickAction::Method {
-                        deployment: deployment.clone(),
-                        method: method.clone(),
-                    };
-                    options.push((method.label, action));
-                }
-            }
-            Err(error) => self.push_log(format!("✗ no message types for {}: {error:#}", deployment.name)),
-        }
-        for alternate in [false, true] {
-            if let Some(form) = call_form(&self.saved, &deployment, alternate) {
-                let label = match &form.action {
-                    FormAction::Call { subcommand, .. } => format!("prog_cli {subcommand} (prefilled)"),
-                    _ => "prefilled".to_owned(),
-                };
-                options.push((label, PickAction::Prefilled(form)));
-            }
-        }
-        if options.is_empty() {
+        if !self.lez_call_ready() {
             return;
         }
+        let found = self.source(&deployment).and_then(|source| {
+            let interface = lez_call::interface(&self.lez, &self.saved.wallet_password, &source)?;
+            Ok((source, interface))
+        });
+        let (source, interface) = match found {
+            Ok(found) => found,
+            Err(error) => {
+                self.push_log(format!("✗ no messages for {}: {error:#}", deployment.name));
+                return;
+            }
+        };
+        let single = interface.single();
+        let seeds = interface.seeds.clone();
+        let options = interface
+            .methods
+            .into_iter()
+            .map(|method| {
+                let mut label = method.label();
+                if method.internal() {
+                    label.push_str(" (another program sends it)");
+                }
+                if let Some(doc) = &method.doc {
+                    label.push_str(&format!(" — {doc}"));
+                }
+                let action = PickAction::Method {
+                    deployment: deployment.clone(),
+                    method,
+                    single,
+                    source: source.clone(),
+                    seeds: seeds.clone(),
+                };
+                (label, action)
+            })
+            .collect();
         self.modal = Modal::Pick(Pick {
             title: format!("{}: pick a message", deployment.name),
             options,
             selected: 0,
         });
-    }
-
-    fn open_call(&mut self, alternate: bool) {
-        if self.focus != Focus::Deployments {
-            self.push_log("select a deployment in the Programs pane to call it".to_owned());
-            return;
-        }
-        let Some(deployment) = self.saved.deployments.get(self.selected_deployment).cloned() else {
-            return;
-        };
-        match call_form(&self.saved, &deployment, alternate) {
-            Some(form) => self.modal = Modal::Form(form),
-            None => self.push_log(format!(
-                "no call for {}{}",
-                deployment.name,
-                if alternate { " with m" } else { "" }
-            )),
-        }
     }
 
     fn on_form_key(&mut self, mut form: Form, key: KeyEvent) {
@@ -1035,9 +1082,6 @@ impl App {
                     self.push_log(format!("✗ {error}"));
                     return;
                 }
-                if !self.prog_cli_ready() {
-                    return;
-                }
                 let Some(payer) = self.need("PAYER (key P)", self.saved.payer.clone().as_ref()) else {
                     return;
                 };
@@ -1079,27 +1123,6 @@ impl App {
                     if self.lez.present() { "" } else { " (not present)" }
                 ));
             }
-            FormAction::Call { subcommand, extra } => {
-                if let Some((label, _)) = form.fields.iter().zip(&values).find(|(_, v)| v.is_empty()).map(|(f, _)| f) {
-                    self.push_log(format!("✗ {label} is empty"));
-                    return;
-                }
-                if !self.prog_cli_ready() {
-                    return;
-                }
-                let Some(payer) = self.need("PAYER (key P)", self.saved.payer.clone().as_ref()) else {
-                    return;
-                };
-                let mut args = vec![subcommand.clone()];
-                for ((label, _), value) in form.fields.iter().zip(values) {
-                    args.push(format!("--{label}"));
-                    args.push(value);
-                }
-                args.extend(extra);
-                self.spawn_job(&format!("call {subcommand}"), move |mut ctx| async move {
-                    jobs::call(&mut ctx, &payer, &args).await.map(|_| ())
-                });
-            }
             FormAction::Watch => {
                 let id = jobs::bare_account_id(&values[0]).to_owned();
                 if bs58::decode(&id).into_vec().map_or(true, |bytes| bytes.len() != 32) {
@@ -1110,127 +1133,90 @@ impl App {
                 let note = if values[1].is_empty() { "watched".to_owned() } else { values[1].clone() };
                 self.on_msg(Msg::Watch(id, note));
             }
-            FormAction::Send {
+            FormAction::Plan {
                 ref program_id,
-                index,
-                ref param_types,
+                ref name,
+                ref method,
+                single,
+                ref source,
+                ref seeds,
             } => {
-                let account = jobs::bare_account_id(&values[0]).to_owned();
-                if account.is_empty() {
-                    self.push_log("✗ account is empty".to_owned());
-                    self.modal = Modal::Form(form);
-                    return;
-                }
-                let params: Vec<(&str, &str)> = param_types
-                    .iter()
-                    .map(String::as_str)
-                    .zip(values[1..=param_types.len()].iter().map(String::as_str))
-                    .collect();
-                let message = match msgtypes::encode_message(index, &params) {
-                    Ok(message) => message,
-                    Err(error) => {
-                        self.push_log(format!("✗ {error:#}"));
-                        self.modal = Modal::Form(form);
-                        return;
-                    }
-                };
-                // After the params: `also`, `pda seed`, then `sign`.
-                let rest = &values[param_types.len() + 1..];
-                let also: Vec<String> = rest[0]
-                    .split(',')
-                    .map(|id| jobs::bare_account_id(id).to_owned())
-                    .filter(|id| !id.is_empty())
-                    .collect();
-                let pda_seed = jobs::bare_account_id(&rest[1]).to_owned();
-                // The program's actor on `account` is always declared, so naming it again does
-                // nothing. It's usually meant as the seed of that account's PDA.
-                if also.contains(&account) {
-                    self.push_log(
-                        "✗ `also` names the account itself, which is already declared. For the account's PDA, put it in `pda seed` instead".to_owned(),
-                    );
-                    self.modal = Modal::Form(form);
-                    return;
-                }
-                let sign = matches!(rest[2].as_str(), "y" | "yes" | "true");
-                if !self.prog_cli_ready() {
+                if !self.lez_call_ready() {
                     return;
                 }
                 let Some(payer) = self.need("PAYER (key P)", self.saved.payer.clone().as_ref()) else {
                     return;
                 };
-                let mut args: Vec<String> = [
-                    "send",
-                    "--program",
-                    program_id,
-                    "--account",
-                    &account,
-                    "--message-hex",
-                    &msgtypes::hex(&message),
-                ]
-                .map(str::to_owned)
-                .to_vec();
-                if sign {
-                    args.push("--sign".to_owned());
-                }
-                for id in also {
-                    args.extend(["--also".to_owned(), id]);
-                }
-                let watch_pda = !pda_seed.is_empty();
-                if watch_pda {
-                    args.extend(["--pda-seed".to_owned(), pda_seed]);
-                }
-                let name = form.title.split(':').next().unwrap_or("send").to_owned();
-                let note = format!("PDA of {name}");
-                self.spawn_job(&format!("send to {name}"), move |mut ctx| async move {
-                    let called = jobs::call(&mut ctx, &payer, &args).await?;
-                    // With a PDA seed, the target is the PDA: show it in the Accounts pane.
-                    if let (true, Some(pda)) = (watch_pda, called.account) {
-                        ctx.send(Msg::Watch(pda, note));
+                let request = match call_request(&payer, program_id, method, single, &values) {
+                    Ok(request) => CallRequest {
+                        name: name.clone(),
+                        source: source.clone(),
+                        seeds: seeds.clone(),
+                        ..request
+                    },
+                    Err(error) => {
+                        self.push_log(format!("✗ {error}"));
+                        self.modal = Modal::Form(form);
+                        return;
                     }
-                    Ok(())
+                };
+                let title = format!("{name}: {}", method.name);
+                self.spawn_job(&format!("plan {title}"), move |mut ctx| async move {
+                    jobs::plan(&mut ctx, title, request).await
                 });
             }
         }
     }
 }
 
-/// The form for one message: the account, each param (prefilled with `ACCOUNT` for an account
-/// id), more of the program's actors to declare (`--also`, `--pda-seed`), and whether `account`
-/// signs.
-fn send_form(saved: &Saved, deployment: &Deployment, method: msgtypes::Method) -> Form {
+/// The form for one message: where it goes, and each param (an account id prefilled with
+/// `ACCOUNT`). Then what the dry run otherwise works out itself: whether `to` signs, more actors
+/// to declare, and seeds to try for a new PDA.
+fn send_form(
+    saved: &Saved,
+    deployment: &Deployment,
+    method: Method,
+    single: bool,
+    source: PathBuf,
+    seeds: Vec<Seed>,
+) -> Form {
     let account = saved.account.clone().unwrap_or_default();
-    let mut fields = vec![("account".to_owned(), account.clone())];
-    for (i, param) in method.params.iter().enumerate() {
-        let name = param.name.clone().unwrap_or_else(|| format!("#{i}"));
-        let label = format!("{name}: {}\n{}", param.ty, msgtypes::hint(&param.ty));
+    let pdas: String = seeds.iter().map(|seed| format!(", or pda:{}", seed.name)).collect();
+    let mut fields = vec![(
+        format!("to\nthe account the message goes to: base58 or a wallet label{pdas}"),
+        account.clone(),
+    )];
+    for param in &method.params {
         let value = if param.ty.ends_with("AccountId") {
             account.clone()
         } else {
             String::new()
         };
-        fields.push((label, value));
+        fields.push((format!("{}: {}\n{}", param.name, param.ty, param.hint), value));
     }
     let params = method.params.len();
     fields.push((
-        "also\noptional: other accounts this program's actor runs on, comma-separated".to_owned(),
+        "sign\nauto: the dry run finds out; y: `to`'s account signs; n: it never does".to_owned(),
+        "auto".to_owned(),
+    ));
+    fields.push((
+        "actors\noptional, comma-separated: more actors to declare (account@program, pda:<seed>, pk:<hex>)".to_owned(),
         String::new(),
     ));
     fields.push((
-        "pda seed\noptional: declare this program's PDA for a seed: an account id, or 0x hex".to_owned(),
+        "pda seeds\noptional, comma-separated: seeds to try for a PDA that isn't on chain yet".to_owned(),
         String::new(),
     ));
-    fields.push((
-        "sign\ny: the account signs, for handlers that check is_authorized".to_owned(),
-        "n".to_owned(),
-    ));
-    let param_types = method.params.iter().map(|p| p.ty.clone()).collect();
     let mut form = Form::new(
-        format!("{}: {} → prog_cli send", deployment.name, method.label.trim()),
+        format!("{}: {} → plan", deployment.name, method.name),
         fields,
-        FormAction::Send {
+        FormAction::Plan {
             program_id: deployment.program_id.clone(),
-            index: method.index,
-            param_types,
+            name: deployment.name.clone(),
+            method,
+            single,
+            source,
+            seeds,
         },
     );
     // Start on the first empty param, not on an optional field.
@@ -1239,6 +1225,52 @@ fn send_form(saved: &Saved, deployment: &Deployment, method: msgtypes::Method) -
         .position(|(_, value)| value.is_empty())
         .map_or(0, |i| i + 1);
     form
+}
+
+/// The call the form's values ask for: `to`, the params, `sign`, `actors` and `pda seeds`. Its
+/// program's name, source and seeds are the caller's to fill in.
+fn call_request(
+    payer: &str,
+    program_id: &str,
+    method: &Method,
+    single: bool,
+    values: &[String],
+) -> Result<CallRequest, String> {
+    let params = method.params.len();
+    let (to, rest) = (&values[0], &values[params + 1..]);
+    if to.is_empty() {
+        return Err("to is empty".to_owned());
+    }
+    let sign = match rest[0].as_str() {
+        "" | "auto" => None,
+        "y" | "yes" | "true" => Some(true),
+        "n" | "no" | "false" => Some(false),
+        other => return Err(format!("sign is auto, y or n, not {other:?}")),
+    };
+    let list = |text: &str| -> Vec<String> {
+        text.split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    Ok(CallRequest {
+        payer: payer.to_owned(),
+        program_id: program_id.to_owned(),
+        to: to.clone(),
+        sign,
+        hinted_signed: method.signed(),
+        actors: list(&rest[1]),
+        pda_seeds: list(&rest[2]),
+        method: (!single).then(|| method.name.clone()),
+        values: method
+            .params
+            .iter()
+            .zip(&values[1..=params])
+            .map(|(param, value)| format!("{}={value}", param.name))
+            .collect(),
+        ..CallRequest::default()
+    })
 }
 
 fn stop_note(stop: Option<StopTarget>) -> String {
@@ -1251,114 +1283,55 @@ fn stop_note(stop: Option<StopTarget>) -> String {
     }
 }
 
-/// The call form for a deployment, prefilled from state. `alternate` is the move program's
-/// `MoveData` (key m).
-fn call_form(saved: &Saved, deployment: &Deployment, alternate: bool) -> Option<Form> {
-    let id = deployment.program_id.clone();
-    let account = saved.account.clone().unwrap_or_default();
-    let latest = |name: &str| {
-        saved
-            .latest(name)
-            .map(|d| d.program_id.clone())
-            .unwrap_or_default()
-    };
-    let field = |label: &str, value: String| (label.to_owned(), value);
-    // A copy of an example in example_progs (`jz_hello_world`) takes the example's message.
-    let name = deployment
-        .name
-        .strip_prefix(userprogs::PREFIX)
-        .unwrap_or(&deployment.name);
-    let (subcommand, fields, extra) = match (name, alternate) {
-        ("hello_world", false) => (
-            "hello",
-            vec![
-                field("program", id),
-                field("account", account),
-                field("text", "Hola mundo!".into()),
-            ],
-            vec![],
-        ),
-        ("hello_world_with_authorization", false) => (
-            "hello",
-            vec![
-                field("program", id),
-                field("account", account),
-                field("text", "Hola mundo!".into()),
-            ],
-            vec!["--sign".to_owned()],
-        ),
-        ("hello_world_with_move_function", false) => (
-            "move-write",
-            vec![
-                field("program", id),
-                field("account", account),
-                field("text", "Hola mundo!".into()),
-            ],
-            vec![],
-        ),
-        ("hello_world_with_move_function", true) => (
-            "move-data",
-            vec![
-                field("program", id),
-                field("from", account),
-                field("to", String::new()),
-            ],
-            vec![],
-        ),
-        ("simple_tail_call", false) => (
-            "tail",
-            vec![
-                field("caller", id),
-                field("callee", latest("hello_world")),
-                field("account", account),
-            ],
-            vec![],
-        ),
-        ("tail_call_with_pda", false) => (
-            "pda",
-            vec![
-                field("caller", id),
-                field("callee", latest("hello_world_with_authorization")),
-            ],
-            vec![],
-        ),
-        _ => return None,
-    };
-    Some(Form::new(
-        format!(
-            "{} → prog_cli {subcommand}{}",
-            deployment.name,
-            if extra.is_empty() { "" } else { " --sign" }
-        ),
-        fields,
-        FormAction::Call {
-            subcommand: subcommand.to_owned(),
-            extra,
-        },
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lez_call::Param;
 
-    fn subcommand_for(name: &str) -> Option<String> {
-        let deployment = Deployment {
+    fn method(name: &str, params: &[(&str, &str)]) -> Method {
+        Method {
             name: name.to_owned(),
-            program_id: "PROG".to_owned(),
-            stale: false,
-        };
-        match call_form(&Saved::default(), &deployment, false)?.action {
-            FormAction::Call { subcommand, .. } => Some(subcommand),
-            _ => None,
+            index: Some(2),
+            fields: String::new(),
+            params: params
+                .iter()
+                .map(|(name, ty)| Param {
+                    name: (*name).to_owned(),
+                    ty: (*ty).to_owned(),
+                    hint: String::new(),
+                })
+                .collect(),
+            doc: None,
+            hints: Vec::new(),
         }
     }
 
+    fn values(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
     #[test]
-    fn an_example_progs_copy_gets_the_examples_call_form() {
-        assert_eq!(subcommand_for("hello_world").as_deref(), Some("hello"));
-        assert_eq!(subcommand_for("jz_hello_world").as_deref(), Some("hello"));
-        assert_eq!(subcommand_for("jz_tail_call_with_pda").as_deref(), Some("pda"));
-        assert_eq!(subcommand_for("jz_my_own_program"), None);
+    fn the_form_gives_the_call() {
+        let mut mint = method("Mint", &[("to", "AccountId"), ("amount", "u128")]);
+        mint.hints = vec!["signed".to_owned()];
+        let request =
+            call_request("PAY", "PROG", &mint, false, &values(&["ACC", "BOB", "30", "auto", "", ""])).unwrap();
+        assert_eq!(request.to, "ACC");
+        assert_eq!(request.sign, None);
+        assert!(request.hinted_signed);
+        assert_eq!(request.method.as_deref(), Some("Mint"));
+        assert_eq!(request.values, ["to=BOB", "amount=30"]);
+
+        let hello = method("Vec<u8>", &[("#0", "Vec<u8>")]);
+        let request =
+            call_request("PAY", "PROG", &hello, true, &values(&["pda:SEED", "Hi", "y", "X@P, pk:ab", "0x01"])).unwrap();
+        assert_eq!(request.sign, Some(true));
+        assert_eq!(request.method, None);
+        assert_eq!(request.actors, ["X@P", "pk:ab"]);
+        assert_eq!(request.pda_seeds, ["0x01"]);
+        assert_eq!(request.values, ["#0=Hi"]);
+
+        assert!(call_request("PAY", "PROG", &hello, true, &values(&["", "Hi", "auto", "", ""])).is_err());
+        assert!(call_request("PAY", "PROG", &hello, true, &values(&["ACC", "Hi", "maybe", "", ""])).is_err());
     }
 }

@@ -11,7 +11,7 @@ cargo run --release
 
 It expects the LEZ checkout at `../../logos-execution-zone`, which is where it sits next to `jz-progs` now. Press `L` to point it somewhere else; the path is saved.
 
-**Deploy and call need `prog_cli`.** That's `examples/program_deployment/src/bin/prog_cli.rs` in the LEZ checkout (branch `jzaki/fix-examples`). Without it, `r` still runs the stock `run_*` runners, which deploy again on every call.
+**Calls need [`lez-call`](../../lez-call/README.md)** (a checkout at `../../lez-call`, or on `PATH`) and the wallet's `program call` subcommand (LEZ branch `jzaki/fix-examples`). **Planning them needs [`lez-dryrun`](../lez-dryrun/README.md)**, in `jz-progs/lez-dryrun`; without it, a call is sent as given, unchecked. `b` builds both. [LEZCALL.md](../LEZCALL.md) is their design. Deploys need only the wallet. Without `lez-call`, `r` still runs the stock `run_*` runners, which deploy again on every call.
 
 Everything else the walkthrough needs must already be installed: the RISC Zero toolchain, `just`, and LEZ's build dependencies. prog-tui doesn't use `nix develop`; start it from inside that shell if you build that way.
 
@@ -26,7 +26,7 @@ Everything else the walkthrough needs must already be installed: the RISC Zero t
 
 ## Layout
 
-- **Status bar:** the LEZ checkout (branch, commit, dirty, whether `prog_cli` is built), the sequencer (stopped, starting, or running; started by prog-tui or not; block height), and `PAYER` / `ACCOUNT`.
+- **Status bar:** the LEZ checkout (branch, commit, dirty, whether `lez-call` and `lez-dryrun` are built), the sequencer (stopped, starting, or running; started by prog-tui or not; block height), and `PAYER` / `ACCOUNT`.
 - **Accounts:** the wallet's accounts. ★ marks `PAYER`, ▶ marks `ACCOUNT`, and each shows its balance, or `off-chain` when it doesn't exist on chain yet. Deploys create a header and some segment accounts in the wallet; `h` shows or hides them.
 - **Account:** the selected account's nonce, balance, and every program's actor state on it. Each state is labelled by program name when prog-tui deployed that program, and shown as text when it's printable.
 - **Programs:** three lists. *Guests* are the built example guests (`$BIN`). *Deployed* are the programs deployed from here; crossed out means no longer on chain, after a reset. *Built-in* is read-only: the native token and program loader (both run by the engine), and the guests in `lez/programs/` (clock, fee, bridge and so on). Those guests are dimmed when the current chain didn't deploy them, which on the dev chain is all but `clock`, `fee`, `bridge` and `sequencer_stake`. Select one to see its full address and where it comes from. Their names also label the actor states in the Account pane.
@@ -39,27 +39,26 @@ Everything else the walkthrough needs must already be installed: the RISC Zero t
 | `W` | Walkthrough. Asks first, because it resets the chain and the wallet |
 | `s` | Start the sequencer, or stop it. Asks first when prog-tui didn't start it |
 | `R` | Reset: stop, `just clean`, start. Wipes the chain and the wallet |
-| `b` | Build the wallet, runners, `prog_cli` and the example guests |
+| `b` | Build the wallet, runners and example guests in LEZ, then `lez-call` and `lez-dryrun` in their checkouts |
 | `i` | Initialise the wallet and import the two funded test accounts |
 | `n` | New public account, with an optional label |
 | `P` / `A` | Make the selected account `PAYER` / `ACCOUNT` |
 | `t` | Native token transfer. Prefilled from `PAYER` to the selected account (or `ACCOUNT`) |
-| `w` / `x` | Watch an account outside the wallet, such as a PDA, so the Accounts pane shows it (◇) and the middle pane shows its actor states / forget the selected watched account. A `send` with a `pda seed` watches its PDA by itself. A reset forgets them all |
-| `v` | Show the message types the selected guest (or deployment) accepts, with each variant's Borsh index. A built guest doesn't record its message types, so this reads the guest's source in LEZ's guest package (`src/bin/<name>.rs`). It finds the handler named in `actor_entrypoint!` and the type of that handler's message parameter. An enum or struct is listed only if that file defines it |
-| `d` | Deploy the selected guest with `prog_cli` (Guests pane) |
+| `w` / `x` | Watch an account outside the wallet, such as a PDA, so the Accounts pane shows it (◇) and the middle pane shows its actor states / forget the selected watched account. A call that declares a PDA watches it by itself. A reset forgets them all |
+| `v` | Show the messages the selected guest (or deployment) accepts: `lez-call iface`. A built guest doesn't record its message types, so this reads the guest's source in LEZ's guest package (`src/bin/<name>.rs`): the handler named in `actor_entrypoint!`, its message type, and each variant's Borsh index, params, doc comment and hints (below). A deployment whose guest prog-tui doesn't know is found by the image id in its on-chain header (`lez-dryrun source-of`) |
+| `d` | Deploy the selected guest (Guests pane): a header account and one segment account per 96 KiB of its code, then `wallet program-loader deploy`, paid by `PAYER` |
 | `u` | Build and deploy a guest from `jz-progs/example_progs` (see below) |
 | `r` | Run the selected guest's stock `run_*` runner. It deploys again, so the programs it deploys are registered by name, and the TUI waits a block for the runner's last call to land before starting another job |
-| `c` | Call the selected deployment (Deployed pane). Pick a message, then fill in its params; Enter sends. See below |
-| `m` | `move-data`, for `hello_world_with_move_function` |
+| `c` | Call the selected deployment (Deployed pane). Pick a message, fill in its params, check the plan, then send. See below |
 | `x` | Forget the selected deployment |
 | `e` | Print shell commands for the sequencer (watch its log, use it, stop it) and the `source` line for `env.sh` |
 | `L` | Change the LEZ checkout |
 | `Tab`, `↑↓`/`jk` | Switch pane, select |
 | `?` / `q` | Help / quit |
 
-**Calling a deployment.** `c` lists the messages the program accepts, read from its source the way `v` reads them. It has one entry per enum variant, or one for a single message type. Choosing one opens a form with these fields:
-- **`account`:** the account whose actor receives the message. It's prefilled with `ACCOUNT`.
-- **One field per parameter, in Borsh order:**
+**Calling a deployment.** `c` lists the messages the program accepts, as `v` shows them: one entry per enum variant, or one for a single message type. Each shows its hints: `[signed]` when its handling checks `is_authorized`, `[internal]` when it checks who sent it (another program sends it; a direct call is refused). Choosing one opens a form:
+- **`to`:** the account the message goes to, prefilled with `ACCOUNT`. Also a wallet label, or `pda:<SEED>` for the program's PDA of a `PdaSeed` constant in its source (the field's hint lists them).
+- **One field per parameter, in Borsh order** (a local struct is split into its fields):
 
   | Type | What to type |
   |---|---|
@@ -67,29 +66,19 @@ Everything else the walkthrough needs must already be installed: the RISC Zero t
   | `String` | text |
   | integers | decimal |
   | `bool` | `true` or `false` |
-  | `AccountId` | base58 (prefilled with `ACCOUNT`) |
-  | `Actor` | `account,program` |
+  | `AccountId` | base58, `0x` hex, or a wallet label (prefilled with `ACCOUNT`) |
+  | `Actor` | `account@program` |
+  | `Option<T>` | empty for none, or a `T` |
   | `[u8; N]` | hex |
   | anything else | the hex of its Borsh encoding |
-- **`also`** (optional): more accounts, comma-separated. The program's actor on each is declared in the transaction, for a message the handler passes on to them.
-- **`pda seed`** (optional): a seed as base58 (an account id) or `0x` hex. The program's actor on that PDA is declared, with the PDA's admission evidence, and the PDA's state is the one checked afterwards.
-- **`sign`:** `y` signs with the account's key, for handlers that check `is_authorized`.
+- **`sign`:** `auto` (the dry run finds out), `y` or `n`.
+- **`actors`, `pda seeds`** (optional, comma-separated): actors to declare yourself (`account@program`, `pda:<seed>`, `pk:<hex>`), and seeds to try for a PDA that isn't on chain yet. Usually not needed.
 
-prog-tui encodes the message and sends it with `prog_cli send --program … --account … --message-hex … [--also …] [--pda-seed …] [--sign]`. The extra actors all run this same program. A message that calls a different program (like `simple_tail_call`) still needs its prefilled entry.
+**Enter plans the call.** `lez-call` encodes the message, and `lez-dryrun` runs the call through the engine locally, against the chain's state, and adds what each run finds missing: an actor a message reaches (declared), a receiver that panics unsigned (signs, if the wallet holds its key), an account that isn't on chain (key or PDA evidence; it tries the source's seed constants and every account id in the call). A pane shows the plan: each actor and why it's there, the states it changes, and the same call as an explicit `wallet program call …` line. A call that would fail shows the guest's panic, and nothing is sent.
 
-For example, `jz_admin_seat` (in `example_progs/admin_seat.rs`): choose `0  Open(Vec<u8>)`, type a config, set `pda seed` to the same account as `account`, and `sign` to `y`. The seat checks the signature and passes the config to that account's PDA, which stores it once. The PDA then appears in the Accounts pane as `◇ … [PDA of jz_admin_seat]`; select it to see the stored config in the middle pane.
+**Enter again sends it**, with that `wallet program call …` line, which waits for the transaction. prog-tui then checks each state the plan changes against the chain. The log shows `✓` per state. A call that doesn't match was reverted (it is still included and charged); the log then shows the reason from the sequencer's log, for a sequencer prog-tui started. A PDA the call declares appears in the Accounts pane as `◇ … [PDA of <program>]`.
 
-**The prefilled entries.** The stock examples also list their ready-made `prog_cli` calls in the picker:
-
-| Deployment | Prefilled entry | Notes |
-|---|---|---|
-| `hello_world` | `prog_cli hello` | Appends text to the account's state |
-| `hello_world_with_authorization` | `hello --sign` | The account signs |
-| `hello_world_with_move_function` | `move-write`, or `move-data` with `m` | |
-| `simple_tail_call` | `tail` | The callee is prefilled with the latest `hello_world` |
-| `tail_call_with_pda` | `pda` | The callee is prefilled with the latest `hello_world_with_authorization` |
-
-**Every call is checked.** `prog_cli` waits for the transaction to be included, then reads the target state back. A call that leaves it unchanged was reverted (it is still included and charged). When that happens, the log shows the reason, taken from the sequencer's log: a guest panic, or an engine error such as `UnadmittedPublicActor`. This only works for a sequencer prog-tui started.
+For example, `jz_admin_seat` (in `example_progs/admin_seat.rs`): choose `0  Open(Vec<u8>)` and type a config. The plan signs for `ACCOUNT` (the seat checks `is_authorized`), declares the seat's PDA (the seat sends to it) with PDA evidence (its seed is `ACCOUNT`'s id), and shows the PDA's state becoming the config.
 
 ## Your own programs
 
@@ -99,7 +88,7 @@ Put a guest's source in `jz-progs/example_progs/<name>.rs`, as a single file lik
 - **What it can use:** only that package's dependencies: `lee_core`, `borsh` and `risc0-zkvm`.
 - **Names:** the stem must be lowercase letters, digits and underscores. The `jz_` prefix keeps your programs apart from LEZ's, and prog-tui never replaces a regular file in LEZ, only its own links.
 - **In LEZ's git:** the links show as untracked files (`?? …/jz_hello_world.rs`).
-- **Calling it:** `c` picks one of its messages from its source and asks for the params (see "Calling a deployment" above). A copy of an example (`jz_hello_world`) also gets the example's prefilled call. This needs a `prog_cli` with `send`.
+- **Calling it:** `c` picks one of its messages from its source and asks for the params (see "Calling a deployment" above).
 - **`b` builds them all:** it links every `.rs` in `example_progs` before building. When you delete a source, `b` removes its link and its built files.
 
 ## Native transfers
@@ -124,8 +113,8 @@ prog-tui starts the sequencer as `RISC0_DEV_MODE=1 just run-sequencer-standalone
 
 prog-tui rewrites `.state/env.sh` on every change. It exports:
 
-- `LEZ_DIR`, `LEE_WALLET_HOME_DIR`, `BIN`;
-- `LEE_WALLET_PASSWORD`, the password prog-tui creates the wallet with (`wallet_password` in `.state/state.json`, default `prog-tui`). The wallet encrypts its storage with it, and every wallet command, runner and `prog_cli` call reads it from this variable instead of asking;
+- `LEZ_DIR`, `LEE_WALLET_HOME_DIR`, `BIN`, and `LEZ_WALLET` (the wallet `lez-call call` runs);
+- `LEE_WALLET_PASSWORD`, the password prog-tui creates the wallet with (`wallet_password` in `.state/state.json`, default `prog-tui`). The wallet encrypts its storage with it, and every wallet command, runner and `lez-call` call reads it from this variable instead of asking;
 - `PAYER`, `ACCOUNT`;
 - `PROGRAM_<NAME>` for each deployment.
 
@@ -136,13 +125,18 @@ source jz-progs/prog-tui/.state/env.sh
 cd "$LEZ_DIR" && just run-wallet account get --raw --scope all --account-id "Public/$ACCOUNT"
 ```
 
-## Using `prog_cli` without the TUI
+## Calling without the TUI
+
+With `lez-call` and `lez-dryrun` built (`b`) and on `PATH`:
 
 ```bash
-export LEE_WALLET_HOME_DIR=$PWD/lez/wallet/configs/debug SUPPRESS_VERBOSE_PRINTS=1
-export LEE_WALLET_PASSWORD=prog-tui   # the wallet's password, if prog-tui created it
-target/release/prog_cli --payer "$PAYER" deploy "$BIN/hello_world.bin"
-target/release/prog_cli --payer "$PAYER" hello --program <id> --account "$ACCOUNT" --text 'Hola mundo!'
+source jz-progs/prog-tui/.state/env.sh && cd "$LEZ_DIR"
+G=examples/program_deployment/methods/guest/src/bin
+lez-call iface $G/hello_world.rs
+MSG=$(lez-call encode $G/hello_world.rs 'Hola mundo!')
+lez-dryrun plan --payer "$PAYER" --program "$PROGRAM_HELLO_WORLD" --message-hex "$MSG" --to "$ACCOUNT" \
+  --signer "$PAYER" --signer "$ACCOUNT"                  # ends with the `wallet program call` line to run
+lez-call call $G/hello_world.rs --payer "Public/$PAYER" --program "$PROGRAM_HELLO_WORLD" --to "Public/$ACCOUNT" 'Hola mundo!'
 ```
 
-Run `prog_cli --help` for the other calls. `SUPPRESS_VERBOSE_PRINTS=1` stops the wallet printing every transaction in full.
+The last line encodes and sends in one go, through `$LEZ_WALLET program call`, with the actors you give and no dry run. A program with several messages takes the message's name, then its values as `name=value` or in order: `… Mint to=holder amount=30`. `--json` prints one `LEZCALL {json}` (or `LEZDRYRUN {json}`) line instead of text. `--help` shows the rest.

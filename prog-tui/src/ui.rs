@@ -63,6 +63,53 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 area,
             );
         }
+        Modal::Plan(view) => {
+            // At least 12 rows; a longer plan scrolls.
+            let width = 120;
+            let inner = usize::from(width.min(frame.area().width.saturating_sub(2)).saturating_sub(2)).max(1);
+            let wrapped: usize = view
+                .lines
+                .iter()
+                .map(|line| line.chars().count().div_ceil(inner).max(1))
+                .sum();
+            let height = u16::try_from(wrapped).unwrap_or(u16::MAX).saturating_add(2).max(12);
+            let area = centered(frame.area(), width, height);
+            frame.render_widget(Clear, area);
+            let visible = usize::from(area.height.saturating_sub(2));
+            let scrolls = wrapped > visible;
+            let scroll = view
+                .scroll
+                .get()
+                .min(u16::try_from(wrapped.saturating_sub(visible)).unwrap_or(u16::MAX));
+            view.scroll.set(scroll);
+            let lines: Vec<Line> = view
+                .lines
+                .iter()
+                .map(|line| {
+                    let styled = Line::from(line.as_str());
+                    if line.starts_with('✗') || line.starts_with("Error") {
+                        styled.red()
+                    } else {
+                        styled
+                    }
+                })
+                .collect();
+            let keys = if scrolls { " · ↑↓ PgUp/PgDn scroll" } else { "" };
+            let (footer, color) = if view.call.is_some() {
+                (format!(" Enter send (wallet program call) · Esc cancel{keys} "), Color::Yellow)
+            } else {
+                (format!(" the dry run failed: nothing to send · Esc closes{keys} "), Color::Red)
+            };
+            frame.render_widget(
+                Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((scroll, 0)).block(
+                    Block::bordered()
+                        .title(format!(" {}: plan ", view.title))
+                        .title_bottom(footer)
+                        .border_style(color),
+                ),
+                area,
+            );
+        }
         Modal::Confirm(text, _) => {
             let area = centered(frame.area(), 70, 5);
             frame.render_widget(Clear, area);
@@ -180,11 +227,17 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         if repo.dirty {
             lez.push(Span::raw(" dirty").yellow());
         }
-        lez.push(Span::raw("  prog_cli "));
-        lez.push(match (repo.has_prog_cli_src, repo.prog_cli_built) {
-            (_, true) => Span::raw("✓").green(),
-            (true, false) => Span::raw("not built (b)").yellow(),
+        lez.push(Span::raw("  lez-call "));
+        lez.push(match (repo.lez_call, repo.lez_call_checkout) {
+            (true, _) => Span::raw("✓").green(),
+            (false, true) => Span::raw("not built (b)").yellow(),
             (false, false) => Span::raw("missing (runners only)").red(),
+        });
+        lez.push(Span::raw("  dry run "));
+        lez.push(match (repo.lez_dryrun, repo.lez_dryrun_checkout) {
+            (true, _) => Span::raw("✓").green(),
+            (false, true) => Span::raw("not built (b)").yellow(),
+            (false, false) => Span::raw("off").yellow(),
         });
     } else if app.lez.present() {
         lez.push(Span::raw("  …"));
@@ -565,7 +618,7 @@ fn draw_keys(frame: &mut Frame, area: Rect, app: &App) {
     let context = match app.focus {
         Focus::Accounts => "P payer · A account · n new · t transfer · w watch · x forget watched",
         Focus::Guests => "v messages · d deploy · r stock runner · u build+deploy file",
-        Focus::Deployments => "c call (pick message) · m move-data · v messages · x forget",
+        Focus::Deployments => "c call (pick message) · v messages · x forget",
         Focus::Builtin => "read-only: details in the middle pane",
     };
     frame.render_widget(
@@ -582,18 +635,17 @@ fn draw_help(frame: &mut Frame) {
         ("W", "walkthrough: build, reset, wallet, PAYER/ACCOUNT, deploy and call hello_world"),
         ("s", "start the sequencer, or stop it (asks first if prog-tui didn't start it)"),
         ("R", "reset: stop, `just clean`, start (wipes the chain and the wallet)"),
-        ("b", "build wallet, runners, prog_cli and the example guests"),
+        ("b", "build wallet, runners, the example guests, lez-call and lez-dryrun"),
         ("i", "initialise the wallet and import the two funded test accounts"),
         ("n", "new public account"),
         ("w / x", "watch an account outside the wallet (a PDA, say) / forget the selected one"),
         ("P / A", "make the selected account PAYER / ACCOUNT"),
         ("t", "native token transfer (wallet auth-transfer send), checked by both balances"),
-        ("v", "the message types the selected guest or deployment accepts, read from its source"),
-        ("d", "deploy the selected guest with prog_cli (Guests pane)"),
+        ("v", "the messages the selected guest or deployment accepts (lez-call iface)"),
+        ("d", "deploy the selected guest (wallet program-loader deploy; Guests pane)"),
         ("r", "run the guest's stock run_* runner: deploys again and calls once"),
         ("u", "build and deploy a guest from jz-progs/example_progs (as jz_<name>)"),
-        ("c", "call the selected deployment: pick a message from its source, fill in its params"),
-        ("m", "move-data, for hello_world_with_move_function"),
+        ("c", "call the selected deployment: pick a message, fill in its params, check the plan"),
         ("x", "forget the selected deployment"),
         ("h", "show or hide the header/segment accounts that deploys create"),
         ("e", "shell commands for the sequencer (log, wallet, stop) and the env.sh to source"),

@@ -20,13 +20,16 @@ use tokio::{
 };
 
 use crate::{
+    guest_bin,
     lez::{Lez, RepoInfo, repo_info},
+    lez_call::{self, Seed},
     rpc::{AccountView, Rpc, describe_bytes, unhex},
     sequencer::{self, SeqStatus, StopTarget},
     state::Deployment,
+    tools::{LEZ_CALL, LEZ_DRYRUN, Tool},
     userprogs,
     wallet::{
-        WalletAccount, is_noise, parse_account_list, parse_new_account, parse_prog_cli,
+        WalletAccount, is_noise, parse_account_list, parse_json_line, parse_new_account,
         parse_program_ids,
     },
 };
@@ -61,6 +64,12 @@ pub enum Msg {
     Deployed(Deployment),
     /// Show this account's state in the Accounts pane: `(id, note)`.
     Watch(String, String),
+    /// A call's plan to show: its title and text, and the call, when it can be sent.
+    Plan {
+        title: String,
+        lines: Vec<String>,
+        call: Option<PlannedCall>,
+    },
     /// The chain and wallet were wiped.
     ChainReset,
     Checklist(Vec<String>),
@@ -161,10 +170,16 @@ impl Ctx {
         command
     }
 
-    pub fn prog_cli(&self, payer: &str, args: &[String]) -> Command {
-        let mut command = self.command(self.lez.release_bin("prog_cli"));
-        command.arg("--payer").arg(payer).args(args);
+    /// A `lez-call` or `lez-dryrun` command, with `LEZ_WALLET` naming LEZ's wallet.
+    pub fn tool(&self, tool: &Tool, args: &[String]) -> anyhow::Result<Command> {
+        let path = tool
+            .path()
+            .ok_or_else(|| anyhow!("{} isn't built (key b) or on PATH", tool.name))?;
+        let mut command = self.command(path);
         command
+            .env("LEZ_WALLET", self.lez.release_bin("wallet"))
+            .args(args);
+        Ok(command)
     }
 
     /// Runs `command`, streaming its stdout and stderr into the log, and returns all of it.
@@ -174,6 +189,11 @@ impl Ctx {
         command: Command,
     ) -> anyhow::Result<CmdOut> {
         self.run_inner(label, command, true).await
+    }
+
+    /// Like [`Self::run`], but into the job's log file only, not the log pane.
+    pub async fn run_quiet(&mut self, label: &str, command: Command) -> anyhow::Result<CmdOut> {
+        self.run_inner(label, command, false).await
     }
 
     /// Like [`Self::run`], but fails when the command does.
@@ -325,6 +345,20 @@ pub async fn build(ctx: &mut Ctx) -> anyhow::Result<()> {
         command,
     )
     .await?;
+    for tool in [LEZ_CALL, LEZ_DRYRUN] {
+        let checkout = tool.checkout();
+        if !tool.has_checkout() {
+            ctx.log(format!("no {} checkout at {}: not building it", tool.name, checkout.display()));
+            continue;
+        }
+        let mut command = ctx.command("cargo");
+        command.args(["build", "--release"]).current_dir(&checkout);
+        ctx.run_ok(
+            &format!("cargo build --release  (in {})", checkout.display()),
+            command,
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -466,18 +500,38 @@ pub async fn choose_payer(ctx: &mut Ctx) -> anyhow::Result<String> {
     bail!("no funded imported account in the wallet; initialise it first (key i)")
 }
 
+/// Deploys a built guest through `program_loader`: a fresh header account and one fresh segment
+/// account per chunk of its code, then `wallet program-loader deploy`, paid by `payer` (the new
+/// accounts can't pay for their own claim). The header's id is the program's id.
 pub async fn deploy(ctx: &mut Ctx, guest: &str, payer: &str) -> anyhow::Result<Deployment> {
     let bin = ctx.lez.guest_bin(guest);
     if !bin.is_file() {
         bail!("{} doesn't exist; build first (key b)", bin.display());
     }
-    let command = ctx.prog_cli(payer, &["deploy".to_owned(), bin.display().to_string()]);
+    let segments = guest_bin::segment_count(&fs::read(&bin)?)
+        .ok_or_else(|| anyhow!("{} isn't a risc0 program binary", bin.display()))?;
+    let header = new_account(ctx, "").await?;
+    let mut args = vec![
+        "program-loader".to_owned(),
+        "deploy".to_owned(),
+        "--elf".to_owned(),
+        bin.display().to_string(),
+        "--header".to_owned(),
+        format!("Public/{header}"),
+        "--segments".to_owned(),
+    ];
+    for _ in 0..segments {
+        args.push(format!("Public/{}", new_account(ctx, "").await?));
+    }
+    args.extend(["--payer".to_owned(), format!("Public/{payer}")]);
+    let command = ctx.wallet(&args.iter().map(String::as_str).collect::<Vec<_>>());
     let output = ctx
-        .run_ok(&format!("prog_cli deploy {guest}"), command)
+        .run_ok(&format!("wallet program-loader deploy {guest}"), command)
         .await?;
-    let program_id = parse_prog_cli(&output)
-        .and_then(|result| result["program_id"].as_str().map(str::to_owned))
-        .ok_or_else(|| anyhow!("prog_cli didn't print a program id"))?;
+    if !output.contains(&format!("Header account id: {header}")) {
+        bail!("the wallet didn't report deploying {guest} at {header}");
+    }
+    let program_id = header;
     ctx.log(format!("deployed {guest} → {program_id}"));
     let deployment = Deployment {
         name: guest.to_owned(),
@@ -488,44 +542,288 @@ pub async fn deploy(ctx: &mut Ctx, guest: &str, payer: &str) -> anyhow::Result<D
     Ok(deployment)
 }
 
-/// Sends one `prog_cli` call. On a revert, shows why, from the sequencer's log.
-/// What a `prog_cli` call left behind: the target actor's state, and the target's account.
-pub struct Called {
-    pub state: Vec<u8>,
-    pub account: Option<String>,
+/// One call to make, as the form gives it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CallRequest {
+    pub payer: String,
+    pub program_id: String,
+    /// The program's name, for reading.
+    pub name: String,
+    /// The guest's source, for `lez-call`.
+    pub source: PathBuf,
+    pub to: String,
+    /// `Some(true)`: `to` signs; `Some(false)`: it never does; `None`: the dry run finds out.
+    pub sign: Option<bool>,
+    /// The source hints that the message is signed.
+    pub hinted_signed: bool,
+    pub actors: Vec<String>,
+    /// Seeds to try for a new PDA, from the form.
+    pub pda_seeds: Vec<String>,
+    /// The source's `PdaSeed` constants.
+    pub seeds: Vec<Seed>,
+    /// The message's name; `None` when the program takes one message type.
+    pub method: Option<String>,
+    /// `name=value` for each param.
+    pub values: Vec<String>,
 }
 
-pub async fn call(ctx: &mut Ctx, payer: &str, args: &[String]) -> anyhow::Result<Called> {
+/// A call ready to send: the wallet command, and what its dry run says it changes.
+#[derive(Clone, Debug)]
+pub struct PlannedCall {
+    pub name: String,
+    /// `program call …`: the words after `wallet`.
+    pub wallet_args: Vec<String>,
+    /// Each actor state the dry run changed, as `(account, program, after)`. Empty without a
+    /// dry run.
+    pub changes: Vec<(String, String, Vec<u8>)>,
+    /// The PDAs the call declares, to watch.
+    pub pdas: Vec<String>,
+}
+
+/// What `prepare` found: the plan's text, and the call when it can be sent.
+pub struct Prepared {
+    pub lines: Vec<String>,
+    pub call: Option<PlannedCall>,
+}
+
+/// Encodes the message with `lez-call`, then plans the call with `lez-dryrun` against the chain:
+/// its actors, signers and evidence, and what it changes. Without `lez-dryrun`, the call is sent
+/// as given, with `to` signing when asked or hinted.
+pub async fn prepare(ctx: &mut Ctx, request: &CallRequest) -> anyhow::Result<Prepared> {
+    let accounts = list_accounts(&ctx.lez, &ctx.password).await?;
+    let public: Vec<&WalletAccount> = accounts.iter().filter(|account| account.public).collect();
+    let labels: Vec<String> = public
+        .iter()
+        .filter_map(|account| Some(format!("{}={}", account.label.as_ref()?, account.id)))
+        .collect();
+
+    // `lez-call call --print` encodes the message and gives the wallet command for the call as
+    // given: what's sent when there's no dry run.
+    let signs_unplanned = request.sign == Some(true)
+        || (request.sign.is_none() && request.hinted_signed && !request.to.starts_with("pda:"));
+    let to = if signs_unplanned && !request.to.ends_with(":sign") {
+        format!("{}:sign", request.to)
+    } else {
+        request.to.clone()
+    };
+    let mut args = vec![
+        "--json".to_owned(),
+        "call".to_owned(),
+        request.source.display().to_string(),
+        "--print".to_owned(),
+        "--program".to_owned(),
+        request.program_id.clone(),
+        "--to".to_owned(),
+        to,
+        "--payer".to_owned(),
+        format!("Public/{}", request.payer),
+    ];
+    for actor in &request.actors {
+        args.extend(["--actor".to_owned(), actor.clone()]);
+    }
+    for label in &labels {
+        args.extend(["--label".to_owned(), label.clone()]);
+    }
+    args.extend(request.method.iter().cloned());
+    args.extend(request.values.iter().cloned());
+    let command = ctx.tool(&LEZ_CALL, &args)?;
+    let output = ctx.run_quiet(&format!("lez-call {}", args.join(" ")), command).await?;
+    let encoded = parse_json_line(&output.out, "LEZCALL").filter(|_| output.ok).ok_or_else(|| {
+        let error = output.out.lines().rev().find(|line| line.starts_with("Error"));
+        anyhow!("{}", error.unwrap_or("lez-call couldn't encode the message"))
+    })?;
+    let message_hex = encoded["message_hex"].as_str().unwrap_or_default().to_owned();
+    let strings = |value: &serde_json::Value| -> Vec<String> {
+        value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| Some(item.as_str()?.to_owned()))
+            .collect()
+    };
+
+    if LEZ_DRYRUN.path().is_none() {
+        let command = encoded["command"].as_str().unwrap_or_default().to_owned();
+        let lines = vec![
+            format!("message {message_hex}"),
+            String::new(),
+            "no dry run: lez-dryrun isn't built (key b), so this is sent as given, unchecked".to_owned(),
+            String::new(),
+            "same call by hand:".to_owned(),
+            format!("  {command}"),
+        ];
+        let call = PlannedCall {
+            name: request.name.clone(),
+            wallet_args: strings(&encoded["wallet_args"]),
+            changes: Vec::new(),
+            pdas: Vec::new(),
+        };
+        return Ok(Prepared {
+            lines,
+            call: Some(call),
+        });
+    }
+
+    let mut args = vec![
+        "--json".to_owned(),
+        "--rpc".to_owned(),
+        ctx.rpc.url.clone(),
+        "plan".to_owned(),
+        "--payer".to_owned(),
+        request.payer.clone(),
+        "--program".to_owned(),
+        request.program_id.clone(),
+        "--program-name".to_owned(),
+        request.name.clone(),
+        "--message-hex".to_owned(),
+        message_hex,
+        "--to".to_owned(),
+        request.to.clone(),
+        "--budget".to_owned(),
+        ctx.lez.wallet_gas_limit().to_string(),
+    ];
+    let mut flag = |name: &str, value: String| args.extend([name.to_owned(), value]);
+    for actor in &request.actors {
+        flag("--actor", actor.clone());
+    }
+    for account in &public {
+        flag("--signer", account.id.clone());
+    }
+    for label in &labels {
+        flag("--label", label.clone());
+    }
+    for seed in &request.seeds {
+        flag("--seed", format!("{}={}", seed.name, seed.bytes));
+    }
+    for seed in &request.pda_seeds {
+        flag("--seed", seed.clone());
+    }
+    for mentioned in strings(&encoded["mentioned"]) {
+        flag("--mention", mentioned);
+    }
+    match request.sign {
+        Some(true) => args.push("--sign".to_owned()),
+        Some(false) => args.push("--no-sign".to_owned()),
+        None => {}
+    }
+    if request.hinted_signed {
+        args.push("--hinted-signed".to_owned());
+    }
+    let command = ctx.tool(&LEZ_DRYRUN, &args)?;
+    let output = ctx.run_quiet(&format!("lez-dryrun {}", args.join(" ")), command).await?;
+    let Some(result) = parse_json_line(&output.out, "LEZDRYRUN") else {
+        let error = output.out.lines().rev().find(|line| line.starts_with("Error"));
+        bail!("{}", error.unwrap_or("lez-dryrun printed no plan"));
+    };
+    let plan = &result["plan"];
+    let mut lines = strings(&result["lines"]);
+    if lines.is_empty() {
+        // A lez-dryrun built before its JSON carried the text: say so, rather than show nothing.
+        lines = vec![
+            "lez-dryrun printed no plan text: rebuild it (key b)".to_owned(),
+            String::new(),
+            plan["error"].as_str().map_or_else(
+                || "the dry run worked".to_owned(),
+                |error| format!("✗ {error}"),
+            ),
+            String::new(),
+            "same call by hand:".to_owned(),
+            format!("  {}", plan["command"].as_str().unwrap_or_default()),
+        ];
+    }
+    if plan["ok"] != true {
+        return Ok(Prepared { lines, call: None });
+    }
+    let changes = plan["changes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|change| {
+            Some((
+                change["account"].as_str()?.to_owned(),
+                change["program"].as_str()?.to_owned(),
+                unhex(change["after"].as_str()?)?,
+            ))
+        })
+        .collect();
+    let pdas = plan["actors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|actor| actor["admission"] == "pda")
+        .filter_map(|actor| Some(actor["account"].as_str()?.to_owned()))
+        .collect();
+    let call = PlannedCall {
+        name: request.name.clone(),
+        wallet_args: strings(&plan["wallet_args"]),
+        changes,
+        pdas,
+    };
+    Ok(Prepared {
+        lines,
+        call: Some(call),
+    })
+}
+
+/// Plans `request`; the plan goes to the UI, to confirm before [`call`] sends it.
+pub async fn plan(ctx: &mut Ctx, title: String, request: CallRequest) -> anyhow::Result<()> {
+    let prepared = prepare(ctx, &request).await?;
+    let ok = prepared.call.is_some();
+    ctx.send(Msg::Plan {
+        title,
+        lines: prepared.lines,
+        call: prepared.call,
+    });
+    if !ok {
+        bail!("the dry run failed: nothing was sent");
+    }
+    Ok(())
+}
+
+/// Sends a planned call with `wallet program call`, then checks each state its dry run said it
+/// changes against the chain. Watches the PDAs it declared, as `PDA of <name>`. On a revert,
+/// shows why, from the sequencer's log.
+pub async fn call(ctx: &mut Ctx, call: &PlannedCall) -> anyhow::Result<()> {
     let log_offset = sequencer::log_len(&ctx.state_dir);
     let managed = sequencer::managed_pgid(&ctx.state_dir).is_some();
-    let command = ctx.prog_cli(payer, args);
-    let label = format!("prog_cli {}", args.join(" "));
-    let output = ctx.run(&label, command).await?;
-    let result = parse_prog_cli(&output.out);
-    let state = result
-        .as_ref()
-        .and_then(|result| unhex(result["state_hex"].as_str()?))
-        .unwrap_or_default();
-    if let Some(result) = &result {
+    let command = ctx.wallet(&call.wallet_args.iter().map(String::as_str).collect::<Vec<_>>());
+    ctx.run_ok(&format!("wallet program call ({})", call.name), command)
+        .await?;
+    for pda in &call.pdas {
+        ctx.send(Msg::Watch(pda.clone(), format!("PDA of {}", call.name)));
+    }
+    if call.changes.is_empty() {
+        ctx.log("no dry run said what this changes, so there's nothing to check");
+        return Ok(());
+    }
+    let mut matched = true;
+    for (account, program, after) in &call.changes {
+        let actual = ctx
+            .rpc
+            .account(account)
+            .await?
+            .and_then(|view| view.actor_states.get(program).cloned())
+            .unwrap_or_default();
+        let ok = actual == *after;
+        matched &= ok;
         ctx.log(format!(
-            "{} in block {}: state of {} at {} is now {}",
-            if result["changed"] == true {
-                "✓ changed"
+            "{} {}@{}: now {}{}",
+            if ok { "✓" } else { "✗" },
+            short(account),
+            short(program),
+            describe_bytes(&actual),
+            if ok {
+                " (as the dry run said)".to_owned()
             } else {
-                "✗ unchanged"
-            },
-            result["block"],
-            short(result["account"].as_str().unwrap_or("?")),
-            short(result["program"].as_str().unwrap_or("?")),
-            describe_bytes(&state),
+                format!(": expected {}", describe_bytes(after))
+            }
         ));
     }
-    if !output.ok {
+    if !matched {
         report_revert(ctx, log_offset, managed).await;
-        bail!("the call didn't change the target state");
+        bail!("the chain doesn't match the dry run: the call probably reverted");
     }
-    let account = result.and_then(|result| result["account"].as_str().map(str::to_owned));
-    Ok(Called { state, account })
+    Ok(())
 }
 
 /// Logs why a transaction reverted: the sequencer log lines written since `log_offset`. Only a
@@ -728,7 +1026,7 @@ pub async fn runner(ctx: &mut Ctx, args: &[String]) -> anyhow::Result<()> {
         }
     } else {
         ctx.log(format!(
-            "the runner printed {} program id(s) for {} guest(s): not registering them. Rebuild (key b) if the runner is older than prog_cli",
+            "the runner printed {} program id(s) for {} guest(s): not registering them. Rebuild (key b) if the runner is older than its PROG_CLI lines",
             ids.len(),
             guests.len()
         ));
@@ -767,7 +1065,7 @@ pub fn short(id: &str) -> String {
 // ---- The walkthrough ----
 
 pub const WALKTHROUGH: [&str; 6] = [
-    "Build wallet, runners, prog_cli, guests",
+    "Build wallet, runners, guests, lez-call",
     "Reset the chain, start the sequencer",
     "Initialise wallet, import test accounts",
     "Set PAYER, create ACCOUNT",
@@ -809,26 +1107,39 @@ pub async fn walkthrough(ctx: &mut Ctx, stop: Option<StopTarget>) -> anyhow::Res
     }
     .await);
     let greeting = "Hola mundo!";
-    if ctx.lez.release_bin("prog_cli").is_file() {
+    if LEZ_CALL.path().is_some() {
         let deployment = step!(ctx, 4, deploy(ctx, "hello_world", &payer).await);
         step!(ctx, 5, async {
-            let args = [
-                "hello",
-                "--program",
-                &deployment.program_id,
-                "--account",
-                &account,
-                "--text",
-                greeting,
-            ]
-            .map(str::to_owned);
-            let state = call(ctx, &payer, &args).await?.state;
+            let program = deployment.program_id.clone();
+            let request = CallRequest {
+                payer: payer.clone(),
+                program_id: program.clone(),
+                name: deployment.name.clone(),
+                source: lez_call::source_of(&ctx.lez, "hello_world"),
+                to: account.clone(),
+                values: vec![format!("#0={greeting}")],
+                ..CallRequest::default()
+            };
+            let prepared = prepare(ctx, &request).await?;
+            for line in &prepared.lines {
+                ctx.log(line.clone());
+            }
+            let planned = prepared
+                .call
+                .ok_or_else(|| anyhow!("the dry run failed: nothing was sent"))?;
+            call(ctx, &planned).await?;
+            let state = ctx
+                .rpc
+                .account(&account)
+                .await?
+                .and_then(|view| view.actor_states.get(&program).cloned())
+                .unwrap_or_default();
             check_greeting(&state, greeting)
         }
         .await);
     } else {
-        // Without prog_cli, the stock runner deploys and calls in one go.
-        ctx.log("prog_cli isn't built: using run_hello_world, which deploys and calls");
+        // Without lez-call, the stock runner deploys and calls in one go.
+        ctx.log("lez-call isn't built: using run_hello_world, which deploys and calls");
         step!(ctx, 4, async {
             let bin = ctx.lez.guest_bin("hello_world").display().to_string();
             runner(ctx, &["run_hello_world".to_owned(), bin, account.clone(), payer.clone()]).await

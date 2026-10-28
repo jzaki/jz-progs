@@ -1,4 +1,4 @@
-//! Reading the output of the `wallet` and `prog_cli` binaries.
+//! Reading the output of the `wallet`, `lez-call` and `lez-dryrun` binaries, and of the runners.
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WalletAccount {
@@ -62,17 +62,19 @@ pub fn parse_new_account(output: &str) -> Option<String> {
     })
 }
 
-/// The last `PROG_CLI {json}` line that `prog_cli` printed.
-pub fn parse_prog_cli(output: &str) -> Option<serde_json::Value> {
+/// The last `<prefix> {json}` line in `output`: `LEZCALL` from `lez-call --json`, `LEZDRYRUN`
+/// from `lez-dryrun --json`.
+pub fn parse_json_line(output: &str, prefix: &str) -> Option<serde_json::Value> {
     output
         .lines()
         .rev()
-        .find_map(|line| line.strip_prefix("PROG_CLI "))
+        .find_map(|line| line.strip_prefix(prefix)?.strip_prefix(' '))
         .and_then(|json| serde_json::from_str(json).ok())
 }
 
-/// Every program id a command deployed, in order, from its `PROG_CLI {"program_id":…}` lines.
-/// A runner that deploys two programs (caller, then callee) prints two.
+/// Every program id a runner deployed, in order, from its `PROG_CLI {"program_id":…}` lines
+/// (`program_deployment::deploy_program` prints them). A runner that deploys two programs
+/// (caller, then callee) prints two.
 pub fn parse_program_ids(output: &str) -> Vec<String> {
     output
         .lines()
@@ -84,7 +86,11 @@ pub fn parse_program_ids(output: &str) -> Vec<String> {
 
 /// Cargo and build-script chatter that would bury the useful lines in the log pane.
 pub fn is_noise(line: &str) -> bool {
-    line.contains("Generated module at")
+    // `lez-call --json`'s and `lez-dryrun --json`'s results: the job reads them and logs what
+    // they say.
+    line.starts_with("LEZCALL ")
+        || line.starts_with("LEZDRYRUN ")
+        || line.contains("Generated module at")
         || line.contains("future version of Rust")
         || line.contains("--future-incompat-report")
         || line.trim().is_empty()
@@ -136,11 +142,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_prog_cli_line() {
-        let output = "Transaction hash is ab\nPROG_CLI {\"block\":12,\"changed\":true,\"state_hex\":\"486f6c61\"}\n";
-        let result = parse_prog_cli(output).unwrap();
-        assert_eq!(result["block"], 12);
-        assert_eq!(result["changed"], true);
-        assert!(parse_prog_cli("nothing").is_none());
+    fn parses_json_lines() {
+        let output = "noise\nLEZDRYRUN {\"plan\":{\"ok\":true}}\nLEZCALL {\"message_hex\":\"0x01\"}\n";
+        assert_eq!(parse_json_line(output, "LEZCALL").unwrap()["message_hex"], "0x01");
+        assert_eq!(parse_json_line(output, "LEZDRYRUN").unwrap()["plan"]["ok"], true);
+        assert!(parse_json_line("LEZCALLX {}", "LEZCALL").is_none());
+        assert!(parse_json_line("nothing", "LEZCALL").is_none());
     }
 }

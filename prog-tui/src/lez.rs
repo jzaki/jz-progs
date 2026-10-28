@@ -6,6 +6,8 @@ use std::{
     process::Command,
 };
 
+use crate::tools::{LEZ_CALL, LEZ_DRYRUN};
+
 /// Where `cargo build -p example_program_deployment_methods` puts the example guests.
 const GUEST_DIR: &str = "target/riscv-guest/example_program_deployment_methods/example_program_deployment_programs/riscv32im-risc0-zkvm-elf/release";
 
@@ -33,7 +35,7 @@ impl Lez {
         self.bin_dir().join(format!("{name}.bin"))
     }
 
-    /// `just run-wallet`'s home; the runners and `prog_cli` read the same wallet.
+    /// `just run-wallet`'s home; the runners and `lez-call` read the same wallet.
     pub fn wallet_home(&self) -> PathBuf {
         self.dir.join("lez/wallet/configs/debug")
     }
@@ -53,11 +55,6 @@ impl Lez {
     /// The example guest package's `src/bin/`: each file there builds as a guest.
     pub fn guest_src_dir(&self) -> PathBuf {
         self.dir.join("examples/program_deployment/methods/guest/src/bin")
-    }
-
-    pub fn prog_cli_src(&self) -> PathBuf {
-        self.dir
-            .join("examples/program_deployment/src/bin/prog_cli.rs")
     }
 
     /// The built example guests, by name, sorted.
@@ -108,9 +105,13 @@ pub struct RepoInfo {
     pub branch: Option<String>,
     pub head: Option<String>,
     pub dirty: bool,
-    pub has_prog_cli_src: bool,
     pub wallet_built: bool,
-    pub prog_cli_built: bool,
+    /// `lez-call` is built (or on PATH); without it, calls can't be made.
+    pub lez_call: bool,
+    pub lez_call_checkout: bool,
+    /// `lez-dryrun` is built (or on PATH); without it, calls are sent unplanned.
+    pub lez_dryrun: bool,
+    pub lez_dryrun_checkout: bool,
 }
 
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
@@ -131,8 +132,10 @@ pub fn repo_info(lez: &Lez) -> RepoInfo {
         branch: git(&lez.dir, &["branch", "--show-current"]).filter(|branch| !branch.is_empty()),
         head: git(&lez.dir, &["rev-parse", "--short", "HEAD"]),
         dirty: git(&lez.dir, &["status", "--porcelain"]).is_some_and(|status| !status.is_empty()),
-        has_prog_cli_src: lez.prog_cli_src().is_file(),
         wallet_built: lez.release_bin("wallet").is_file(),
-        prog_cli_built: lez.release_bin("prog_cli").is_file(),
+        lez_call: LEZ_CALL.path().is_some(),
+        lez_call_checkout: LEZ_CALL.has_checkout(),
+        lez_dryrun: LEZ_DRYRUN.path().is_some(),
+        lez_dryrun_checkout: LEZ_DRYRUN.has_checkout(),
     }
 }

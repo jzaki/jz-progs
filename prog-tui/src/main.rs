@@ -3,12 +3,14 @@
 
 mod app;
 mod builtin;
+mod guest_bin;
 mod jobs;
 mod lez;
-mod msgtypes;
+mod lez_call;
 mod rpc;
 mod sequencer;
 mod state;
+mod tools;
 mod ui;
 mod userprogs;
 mod wallet;
