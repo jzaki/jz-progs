@@ -1,6 +1,6 @@
 # jz-progs
 
-Notes for writing Logos Execution Zone (LEZ) programs. The target is **v0.4**, the actor model that is now merged into `dev` of [`logos-blockchain/logos-execution-zone`](https://github.com/logos-blockchain/logos-execution-zone). There is no v0.4 tag yet. Checked against `dev` at `e2913677b` (2026-10-14).
+Notes for writing Logos Execution Zone (LEZ) programs. The target is **v0.4**, the actor model that is now merged into `dev` of [`logos-blockchain/logos-execution-zone`](https://github.com/logos-blockchain/logos-execution-zone). There is no v0.4 tag yet. Checked against `dev` at `93af39c8b` (2026-10-28).
 
 ## Which version?
 

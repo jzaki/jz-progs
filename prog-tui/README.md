@@ -125,6 +125,7 @@ prog-tui starts the sequencer as `RISC0_DEV_MODE=1 just run-sequencer-standalone
 prog-tui rewrites `.state/env.sh` on every change. It exports:
 
 - `LEZ_DIR`, `LEE_WALLET_HOME_DIR`, `BIN`;
+- `LEE_WALLET_PASSWORD`, the password prog-tui creates the wallet with (`wallet_password` in `.state/state.json`, default `prog-tui`). The wallet encrypts its storage with it, and every wallet command, runner and `prog_cli` call reads it from this variable instead of asking;
 - `PAYER`, `ACCOUNT`;
 - `PROGRAM_<NAME>` for each deployment.
 
@@ -139,6 +140,7 @@ cd "$LEZ_DIR" && just run-wallet account get --raw --scope all --account-id "Pub
 
 ```bash
 export LEE_WALLET_HOME_DIR=$PWD/lez/wallet/configs/debug SUPPRESS_VERBOSE_PRINTS=1
+export LEE_WALLET_PASSWORD=prog-tui   # the wallet's password, if prog-tui created it
 target/release/prog_cli --payer "$PAYER" deploy "$BIN/hello_world.bin"
 target/release/prog_cli --payer "$PAYER" hello --program <id> --account "$ACCOUNT" --text 'Hola mundo!'
 ```

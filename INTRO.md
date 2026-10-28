@@ -10,7 +10,7 @@ How to build, deploy and call a first LEZ program from the LEZ repo itself, on e
 
 Sources:
 
-- `logos-blockchain/logos-execution-zone` on `dev` (checked at `e2913677b`, 2026-10-14) for v0.4, run from branch `jzaki/fix-examples` (`be940d8f8`, which adds runner fixes on top of `e2913677b`), and tags **v0.2.4** and **v0.3.0** for the older sections. `../logos-execution-zone` is the local checkout. Files used: `Justfile`, `flake.nix`, `rust-toolchain.toml`, `examples/program_deployment/`, `lez/wallet/`, `lez/programs/`.
+- `logos-blockchain/logos-execution-zone` on `dev` (checked at `93af39c8b`, 2026-10-28) for v0.4, run from branch `jzaki/fix-examples` (`850886286`, which adds runner fixes on top of `93af39c8b`), and tags **v0.2.4** and **v0.3.0** for the older sections. `../logos-execution-zone` is the local checkout. Files used: `Justfile`, `flake.nix`, `rust-toolchain.toml`, `examples/program_deployment/`, `lez/wallet/`, `lez/programs/`.
 - `logos-co/logos-docs` [Journey] issues #506–#511 and #514, the LEZ developers' notes for testnet v0.3. Issue numbers like `#514` refer to these, and LEZ PRs are written "PR 875".
 - `logos-co/logos-docs` branch `docs/zone-endpoint-ref`, file `docs/get-started/testnet-endpoints.md` (commit `de03a2b0`, unmerged at the time of writing, so it may move): the RPC, explorer, release and channel for each testnet. Section 1 copies the rows used here. If they differ, that page wins.
 - The actor-model manual on LEZ branch `moudy/guide-mdbook-fixes` (`docs/actor-program-development-book/`; first written on `schouhy/lez-guide-mdbook`). Section 4 links to it instead of repeating it.
@@ -245,7 +245,7 @@ $WALLET account get --raw --scope all --account-id "Public/$ACCOUNT"   # shard h
 
 ## 4. LEZ v0.4: the actor model on `dev` (local)
 
-> **Not released.** There is no v0.4 tag or testnet yet. The endpoints page lists 0.4 as TBD, so local is the only option for now. This is the actor model that PR #935 merged into LEZ `dev`, checked at `e2913677b`. Build against `dev` and expect names to move. The steps below follow the code. The local run was tried on 2026-10-16 on branch `jzaki/fix-examples` (`be940d8f8`), which fixes the example runners. The deploy and the hello-world call both work there.
+> **Not released.** There is no v0.4 tag or testnet yet. The endpoints page lists 0.4 as TBD, so local is the only option for now. This is the actor model that PR #935 merged into LEZ `dev`, checked at `93af39c8b`. Build against `dev` and expect names to move. The steps below follow the code. The local run was tried on 2026-10-16 on branch `jzaki/fix-examples` (`be940d8f8`), which fixes the example runners. The deploy and the hello-world call both work there.
 
 **The idea.** A program no longer rewrites accounts or plans effects. It is a handler that receives **one message** addressed to **one actor**, and an actor is one program's state on one account. The handler sees only that state, and returns the new state plus any messages it wants to send to other actors.
 
@@ -276,7 +276,7 @@ For what `ReceiveInput` and `Response` contain, and how sync and async messages 
 
 ### Run it locally
 
-Do section 1 first, with `git checkout jzaki/fix-examples` for the tag. That branch is `dev` at `e2913677b` plus fixes to the example runners (see the note below the runner). The pinned Rust is 1.98.1.
+Do section 1 first, with `git checkout jzaki/fix-examples` for the tag. That branch is `dev` at `93af39c8b` plus fixes to the example runners (see the note below the runner). The pinned Rust is 1.98.1.
 
 ```bash
 # Terminal 1: local sequencer, listening on 127.0.0.1:3040 by default. Dev mode skips proving.
@@ -284,12 +284,14 @@ RISC0_DEV_MODE=1 just run-sequencer-standalone
 
 # Terminal 2: wallet. `just run-wallet` keeps its home in lez/wallet/configs/debug.
 export LEE_WALLET_HOME_DIR=$PWD/lez/wallet/configs/debug   # the runner below reads the same wallet
-just run-wallet check-health             # asks for a password the first time
+just run-wallet check-health             # first time: asks for a new password, twice (see below)
 just wallet-import-test-accounts         # imports and funds two test accounts; prints the list
 PAYER=<first account id listed above>
 just run-wallet account new public       # the account hello_world writes to
 ACCOUNT=<account id printed above>
 ```
+
+**The wallet password encrypts the wallet's storage** (`storage.json`). It is no longer a key seed: the keys come from the mnemonic the wallet prints. Leave it empty to keep the storage unencrypted, as before. With a non-empty one, every later wallet command, runner and `prog_cli` call asks for it on the terminal, or reads it from `LEE_WALLET_PASSWORD`. So for this walkthrough, either press Enter twice, or `export LEE_WALLET_PASSWORD=<password>` before `check-health` (then it doesn't ask at all). `wallet set-password` changes it later.
 
 Then build the guests (section 1) and run the hello-world runner. It deploys the program through the program loader, so there is no separate deploy step:
 
@@ -300,7 +302,7 @@ Then build the guests (section 1) and run the hello-world runner. It deploys the
 
 **Expect a lot of output.** The runner, like `wallet program-loader deploy`, prints every transaction in full, including the program bytes in each segment upload. That comes to about 1 MB of numbers in the terminal, and it's normal. The lines to look for are `Transaction hash is …` and `Transaction is included in block N`. For hello world there are four pairs, one per deploy transaction: three segments and the header. The call itself prints nothing. To see only those, pipe the output through `grep -E 'Transaction (hash|is included)|rror|panicked'`.
 
-> **On `dev` (`e2913677b`) this runner fails. Use branch `jzaki/fix-examples`, which fixes it.** On `dev`, the deploy miscounts segments (`SegmentCountMismatch`), the call declares no fee (`MissingFeeDeclaration`), and a fresh `ACCOUNT` isn't admitted, so the call reverts with `UnadmittedPublicActor`. The branch's commits fix all three. Their messages and diffs explain each change.
+> **On `dev` (`93af39c8b`) this runner fails. Use branch `jzaki/fix-examples`, which fixes it.** On `dev`, the deploy miscounts segments (`SegmentCountMismatch`), the call declares no fee (`MissingFeeDeclaration`), and a fresh `ACCOUNT` isn't admitted, so the call reverts with `UnadmittedPublicActor`. The branch's commits fix all three. Their messages and diffs explain each change.
 >
 > - **What the branch covers.** The fee fix is in every `run_*` runner. The admission fix is only in `run_hello_world`. The other runners haven't been tried, so they may still revert on a fresh account that doesn't sign the call.
 > - **Check the call yourself.** The runner doesn't check the call's result, even on the branch. A failed call still exits cleanly, so check the account (below).

@@ -28,7 +28,8 @@ BIN=$PWD/target/riscv-guest/example_program_deployment_methods/example_program_d
 `just clean` wiped the wallet storage, so this runs on every reset.
 
 ```bash
-just run-wallet check-health             # asks for a new password
+export LEE_WALLET_PASSWORD=             # empty: no storage encryption and no prompts; set one to encrypt it
+just run-wallet check-health             # creates the wallet
 just wallet-import-test-accounts         # imports the two genesis-funded test accounts and lists them
 PAYER=<first account id listed above>
 just run-wallet account new public       # the account hello_world writes to
@@ -46,7 +47,7 @@ The runner deploys through the program loader, then sends the call.
 
 **Expect about 1 MB of output.** The runner prints every transaction in full, including the program bytes in each segment upload, and that's normal. Look for four `Transaction hash is …` / `Transaction is included in block N` pairs: three segments and the header. The hello-world call prints nothing, so step 5 is how you check it. To see only those, append `| grep -E 'Transaction (hash|is included)|rror|panicked'` inside the parentheses.
 
-On `dev` at `e2913677b` the runner needs three fixes in `examples/program_deployment/` first (details in INTRO.md section 4, "Run it locally"):
+On `dev` at `93af39c8b` the runner needs three fixes in `examples/program_deployment/` first (details in INTRO.md section 4, "Run it locally"):
 
 1. **Segment count** (`src/lib.rs`): count segments from `ProgramBinary::decode(&bytecode)?.user_elf`, not the whole `.bin`. Otherwise: `SegmentCountMismatch`.
 2. **Fee:** build the call with `Message::try_new_with_fees(.., FeeDeclaration::new(payer, ..))`, include the payer's nonce, and sign with the payer. Otherwise: `MissingFeeDeclaration`.

@@ -39,7 +39,8 @@ pub struct Saved {
     pub lez_dir: String,
     pub payer: Option<String>,
     pub account: Option<String>,
-    /// Piped to `wallet check-health` on first run. The wallet doesn't use it yet.
+    /// The wallet storage's password, given to every wallet command as `LEE_WALLET_PASSWORD`.
+    /// A non-empty one encrypts the storage.
     pub wallet_password: String,
     pub deployments: Vec<Deployment>,
     pub watched: Vec<Watched>,
@@ -150,6 +151,7 @@ pub fn env_sh(saved: &Saved, lez: &Lez) -> String {
         "LEE_WALLET_HOME_DIR",
         &lez.wallet_home().display().to_string(),
     );
+    export("LEE_WALLET_PASSWORD", &saved.wallet_password);
     export("BIN", &lez.bin_dir().display().to_string());
     if let Some(payer) = &saved.payer {
         export("PAYER", payer);
@@ -193,6 +195,7 @@ mod tests {
         let lez = Lez::new(PathBuf::from("/x/it's"));
         let script = env_sh(&saved, &lez);
         assert!(script.contains("export LEZ_DIR='/x/it'\\''s'\n"));
+        assert!(script.contains("export LEE_WALLET_PASSWORD='prog-tui'\n"));
         assert!(script.contains("export PAYER='PAY'\n"));
         assert!(!script.contains("ACCOUNT="));
         assert!(script.contains("export PROGRAM_HELLO_WORLD='NEW'\n"));

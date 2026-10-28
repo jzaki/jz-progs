@@ -18,7 +18,7 @@ This file describes SPEL **as it is**, as groundwork for redesigning it for the 
 | `mmlado/spel-admin-authority` | `main` at `027197f` (2026-10-16). Pins spel tag `v0.7.0` (LEZ v0.2.4) | The first extension (section 5). Read on GitHub |
 | `mmlado/spel-freeze-authority` | `main` at `959c0cf` (2026-10-14). Same pins | The second extension, stacked on the first. Shared primitive: `mmlado/spel-authority` `2902dc7` |
 | `logos-blockchain/logos-execution-zone` | tag `v0.2.5-rc2` (`d8596eb73`, 2026-09-09) | The LEZ API SPEL compiles against |
-| `logos-blockchain/logos-execution-zone` | `jzaki/fix-examples` (`928493c00`) | v0.4 contrast, using `dev` names |
+| `logos-blockchain/logos-execution-zone` | `jzaki/fix-examples` (`850886286`) | v0.4 contrast, using `dev` names |
 
 ---
 

@@ -327,8 +327,9 @@ impl App {
             self.refreshing.accounts = true;
             self.last_accounts = Some(Instant::now());
             let (lez, tx) = (self.lez.clone(), self.tx.clone());
+            let password = self.saved.wallet_password.clone();
             self.rt.spawn(async move {
-                let accounts = jobs::list_accounts(&lez).await.unwrap_or_default();
+                let accounts = jobs::list_accounts(&lez, &password).await.unwrap_or_default();
                 let _ = tx.send(Msg::Accounts(accounts));
             });
         }

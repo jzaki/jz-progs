@@ -4,7 +4,7 @@ A porting guide for developers who have a Logos Execution Zone (LEZ) program wri
 
 > **What "v0.4" means here.** There is no `v0.4` tag yet.
 > - **v0.2** is LEZ tag **`v0.2.4`**, the last stable release of the account-rewriting model. It is **legacy**.
-> - **v0.4** is the **actor model on `dev`** of `logos-blockchain/logos-execution-zone`. It is how programs will be written. It arrived with PR #935 (`artem/transactional-actor-environment`, merge `fa68310f6`). This guide was checked against `dev` at **`e2913677b`** (2026-10-14). `dev` still moves, so recheck names before you rely on them.
+> - **v0.4** is the **actor model on `dev`** of `logos-blockchain/logos-execution-zone`. It is how programs will be written. It arrived with PR #935 (`artem/transactional-actor-environment`, merge `fa68310f6`). This guide was checked against `dev` at **`93af39c8b`** (2026-10-28). `dev` still moves, so recheck names before you rely on them.
 > - v0.3.0 (`plan`/`apply` on shards) is the current testnet, but very short-lived, so don't port to it. It is in [MODEL_CHANGES.md](MODEL_CHANGES.md). It appears here only where it explains a v0.4 design. Port straight from v0.2 to v0.4.
 
 ## Read this next to the actor-model manual

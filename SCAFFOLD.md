@@ -24,7 +24,7 @@ Section 7 maps each part onto v0.4 without proposing a design.
 | `logos-co/scaffold` PR #199, "rename lez-framework to spel; delegate scaffolding to spel init" | branch `feat/spel-template` at `efb7620` (2026-10-12), open since 2026-06-02 | The SPEL v0.7 / LEZ v0.2.4 port |
 | `logos-co/spel` | tag `v0.5.0` (`73fc462`) | The SPEL that scaffold pins. SPEL.md covers SPEL `main` |
 | `logos-blockchain/logos-execution-zone` | tags `v0.1.2`, `v0.2.4`, `v0.3.1` | What scaffold and its PRs build against |
-| `logos-blockchain/logos-execution-zone` | `jzaki/fix-examples` (`928493c00`) | v0.4 contrast, using `dev` names |
+| `logos-blockchain/logos-execution-zone` | `jzaki/fix-examples` (`850886286`) | v0.4 contrast, using `dev` names |
 
 I read the two PRs from their branches. Their numbers, titles and authors come from the repo's GitHub pull-request list, read on 2026-10-22. Nothing here was run: every claim comes from reading code and docs.
 

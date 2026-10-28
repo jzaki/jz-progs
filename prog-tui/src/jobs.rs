@@ -14,7 +14,7 @@ use std::{
 
 use anyhow::{Context as _, anyhow, bail};
 use tokio::{
-    io::{AsyncBufReadExt as _, AsyncRead, AsyncWriteExt as _, BufReader},
+    io::{AsyncBufReadExt as _, AsyncRead, BufReader},
     process::Command,
     sync::mpsc::{UnboundedSender, unbounded_channel},
 };
@@ -131,13 +131,14 @@ impl Ctx {
         }
     }
 
-    /// A command in the LEZ repo, with the wallet home set and the wallet's transaction dumps
-    /// suppressed.
+    /// A command in the LEZ repo, with the wallet home and password set and the wallet's
+    /// transaction dumps suppressed.
     pub fn command(&self, program: impl AsRef<OsStr>) -> Command {
         let mut command = Command::new(program);
         command
             .current_dir(&self.lez.dir)
             .env("LEE_WALLET_HOME_DIR", self.lez.wallet_home())
+            .env("LEE_WALLET_PASSWORD", &self.password)
             .env("SUPPRESS_VERBOSE_PRINTS", "1")
             .env("RISC0_DEV_MODE", "1");
         // A new session has no controlling terminal, so tools that write to /dev/tty (the risc0
@@ -171,9 +172,8 @@ impl Ctx {
         &mut self,
         label: &str,
         command: Command,
-        stdin: Option<String>,
     ) -> anyhow::Result<CmdOut> {
-        self.run_inner(label, command, stdin, true).await
+        self.run_inner(label, command, true).await
     }
 
     /// Like [`Self::run`], but fails when the command does.
@@ -181,9 +181,8 @@ impl Ctx {
         &mut self,
         label: &str,
         command: Command,
-        stdin: Option<String>,
     ) -> anyhow::Result<String> {
-        let output = self.run(label, command, stdin).await?;
+        let output = self.run(label, command).await?;
         if !output.ok {
             bail!("`{label}` failed");
         }
@@ -194,25 +193,17 @@ impl Ctx {
         &mut self,
         label: &str,
         mut command: Command,
-        stdin: Option<String>,
         show: bool,
     ) -> anyhow::Result<CmdOut> {
         self.write(format!("$ {label}"), show);
         command
-            .stdin(if stdin.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         let mut child = command
             .spawn()
             .with_context(|| format!("couldn't start `{label}`"))?;
-        if let (Some(input), Some(mut pipe)) = (stdin, child.stdin.take()) {
-            pipe.write_all(input.as_bytes()).await?;
-        }
         let (line_tx, mut lines) = unbounded_channel();
         if let Some(stdout) = child.stdout.take() {
             tokio::spawn(forward_lines(stdout, line_tx.clone()));
@@ -270,12 +261,13 @@ pub async fn gather_status(lez: Lez, state_dir: PathBuf, rpc: Rpc) -> Status {
 }
 
 /// `wallet account list`, without logging.
-pub async fn list_accounts(lez: &Lez) -> anyhow::Result<Vec<WalletAccount>> {
+pub async fn list_accounts(lez: &Lez, password: &str) -> anyhow::Result<Vec<WalletAccount>> {
     let output = Command::new(lez.release_bin("wallet"))
         .arg("account")
         .arg("list")
         .current_dir(&lez.dir)
         .env("LEE_WALLET_HOME_DIR", lez.wallet_home())
+        .env("LEE_WALLET_PASSWORD", password)
         .stdin(Stdio::null())
         .output()
         .await?;
@@ -331,7 +323,6 @@ pub async fn build(ctx: &mut Ctx) -> anyhow::Result<()> {
     ctx.run_ok(
         "cargo build --release -p wallet -p program_deployment -p example_program_deployment_methods",
         command,
-        None,
     )
     .await?;
     Ok(())
@@ -353,7 +344,6 @@ pub async fn build_and_deploy(ctx: &mut Ctx, file: &Path, payer: &str) -> anyhow
     ctx.run_ok(
         "cargo build --release -p example_program_deployment_methods",
         command,
-        None,
     )
     .await?;
     deploy(ctx, &name, payer).await?;
@@ -427,7 +417,7 @@ pub async fn reset(ctx: &mut Ctx, stop: Option<StopTarget>) -> anyhow::Result<()
     }
     let mut command = ctx.command("just");
     command.arg("clean");
-    let output = ctx.run("just clean", command, None).await?;
+    let output = ctx.run("just clean", command).await?;
     if !output.ok {
         if ctx.lez.sequencer_home().exists() || ctx.lez.storage_json().exists() {
             bail!("`just clean` failed before removing the chain data");
@@ -440,13 +430,12 @@ pub async fn reset(ctx: &mut Ctx, stop: Option<StopTarget>) -> anyhow::Result<()
 
 /// `wallet check-health` (creates the wallet on first run), then imports the two test accounts.
 pub async fn wallet_init(ctx: &mut Ctx) -> anyhow::Result<()> {
+    // The wallet reads the new storage's password from `LEE_WALLET_PASSWORD`, set by `command`.
     let command = ctx.wallet(&["check-health"]);
-    let password = format!("{}\n", ctx.password);
-    ctx.run_ok("wallet check-health", command, Some(password))
-        .await?;
+    ctx.run_ok("wallet check-health", command).await?;
     let mut command = ctx.command("just");
     command.arg("wallet-import-test-accounts");
-    ctx.run_ok("just wallet-import-test-accounts", command, None)
+    ctx.run_ok("just wallet-import-test-accounts", command)
         .await?;
     Ok(())
 }
@@ -457,13 +446,13 @@ pub async fn new_account(ctx: &mut Ctx, label: &str) -> anyhow::Result<String> {
         args.extend(["--label", label]);
     }
     let command = ctx.wallet(&args);
-    let output = ctx.run_ok("wallet account new public", command, None).await?;
+    let output = ctx.run_ok("wallet account new public", command).await?;
     parse_new_account(&output).ok_or_else(|| anyhow!("no account id in the wallet's output"))
 }
 
 /// The first imported account with a balance: one of the genesis test accounts.
 pub async fn choose_payer(ctx: &mut Ctx) -> anyhow::Result<String> {
-    let accounts = list_accounts(&ctx.lez).await?;
+    let accounts = list_accounts(&ctx.lez, &ctx.password).await?;
     for account in accounts.iter().filter(|a| a.public && a.path.is_none()) {
         if ctx
             .rpc
@@ -484,7 +473,7 @@ pub async fn deploy(ctx: &mut Ctx, guest: &str, payer: &str) -> anyhow::Result<D
     }
     let command = ctx.prog_cli(payer, &["deploy".to_owned(), bin.display().to_string()]);
     let output = ctx
-        .run_ok(&format!("prog_cli deploy {guest}"), command, None)
+        .run_ok(&format!("prog_cli deploy {guest}"), command)
         .await?;
     let program_id = parse_prog_cli(&output)
         .and_then(|result| result["program_id"].as_str().map(str::to_owned))
@@ -511,7 +500,7 @@ pub async fn call(ctx: &mut Ctx, payer: &str, args: &[String]) -> anyhow::Result
     let managed = sequencer::managed_pgid(&ctx.state_dir).is_some();
     let command = ctx.prog_cli(payer, args);
     let label = format!("prog_cli {}", args.join(" "));
-    let output = ctx.run(&label, command, None).await?;
+    let output = ctx.run(&label, command).await?;
     let result = parse_prog_cli(&output.out);
     let state = result
         .as_ref()
@@ -612,7 +601,7 @@ pub async fn transfer(ctx: &mut Ctx, from: &str, to: &str, amount: u128) -> anyh
     if from == to {
         bail!("from and to are the same account");
     }
-    let accounts = list_accounts(&ctx.lez).await?;
+    let accounts = list_accounts(&ctx.lez, &ctx.password).await?;
     let in_wallet = |id: &str| accounts.iter().any(|a| a.public && a.id == id);
     if !in_wallet(from) {
         bail!("{} isn't a public account in this wallet, so it can't sign", short(from));
@@ -663,7 +652,6 @@ pub async fn transfer(ctx: &mut Ctx, from: &str, to: &str, amount: u128) -> anyh
     ctx.run_ok(
         &format!("wallet auth-transfer send {amount} {} → {}", short(from), short(to)),
         command,
-        None,
     )
     .await?;
 
@@ -725,7 +713,7 @@ pub async fn runner(ctx: &mut Ctx, args: &[String]) -> anyhow::Result<()> {
     let (name, rest) = args.split_first().ok_or_else(|| anyhow!("no runner"))?;
     let mut command = ctx.command(ctx.lez.release_bin(name));
     command.args(rest);
-    let output = ctx.run_ok(&args.join(" "), command, None).await?;
+    let output = ctx.run_ok(&args.join(" "), command).await?;
 
     let guests = runner_guests(rest);
     let ids = parse_program_ids(&output);
