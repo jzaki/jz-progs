@@ -1,4 +1,4 @@
-//! A program's messages, from `lez-call` (`../lez-call`).
+//! A program's messages, from `lez-call` (`../lez-prog-call`).
 //!
 //! `lez-call iface` reads a guest's source: the messages its handler takes, their params in Borsh
 //! order, hints from what each one checks, and its `PdaSeed` constants. It's quick (no chain), so

@@ -1,7 +1,7 @@
 # Calling any LEZ program from what it is
 
 Three pieces work out a program's interface and the shape of a call to it, then send the call:
-- **`lez-call`** ([../lez-call](../lez-call/README.md)) is a small standalone CLI. It reads a guest's source for its interface and encodes messages. It links no LEZ crate.
+- **`lez-call`** ([../lez-prog-call](../lez-prog-call/README.md)) is a small standalone CLI. It reads a guest's source for its interface and encodes messages. It links no LEZ crate.
 - **`lez-dryrun`** ([lez-dryrun/](lez-dryrun/README.md)) runs the call through LEZ's engine locally, against chain state, to work out its actors, signers and evidence.
 - **`wallet program call`** sends exactly the transaction given. It's the one change in LEZ.
 
@@ -245,7 +245,7 @@ No example program needed a change to be called. Each row was called on a local 
 
 | Piece | Where | Depends on |
 |---|---|---|
-| `lez-call` | its own repo, `../lez-call` | `syn`, `quote`, `serde`, `serde_json`, `bs58`, `anyhow` (14 crates in all) |
+| `lez-call` | its own repo, `../lez-prog-call` | `syn`, `quote`, `serde`, `serde_json`, `bs58`, `anyhow` (14 crates in all) |
 | `lez-dryrun` | `jz-progs/lez-dryrun`, its own Cargo workspace | LEZ's `lee`, `lee_core`, `program_loader_core` and `sequencer_service_rpc`, by path, plus risc0 (LEZ's `Cargo.lock` and toolchain, copied) |
 | `wallet program call` | LEZ, `lez/wallet/src/cli/programs/program.rs` | the wallet |
 | prog-tui | `jz-progs/prog-tui` | no LEZ crate; runs `wallet`, `lez-call` and `lez-dryrun` |

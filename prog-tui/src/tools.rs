@@ -10,10 +10,10 @@ pub struct Tool {
     dir: &'static str,
 }
 
-/// `../lez-call`, next to jz-progs.
+/// `../lez-prog-call`, next to jz-progs.
 pub const LEZ_CALL: Tool = Tool {
     name: "lez-call",
-    dir: "../../lez-call",
+    dir: "../../lez-prog-call",
 };
 
 /// `jz-progs/lez-dryrun`.

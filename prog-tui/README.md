@@ -11,7 +11,7 @@ cargo run --release
 
 It expects the LEZ checkout at `../../logos-execution-zone`, which is where it sits next to `jz-progs` now. Press `L` to point it somewhere else; the path is saved.
 
-**Calls need [`lez-call`](../../lez-call/README.md)** (a checkout at `../../lez-call`, or on `PATH`) and the wallet's `program call` subcommand (LEZ branch `jzaki/fix-examples`). **Planning them needs [`lez-dryrun`](../lez-dryrun/README.md)**, in `jz-progs/lez-dryrun`; without it, a call is sent as given, unchecked. `b` builds both. [LEZCALL.md](../LEZCALL.md) is their design. Deploys need only the wallet. Without `lez-call`, `r` still runs the stock `run_*` runners, which deploy again on every call.
+**Calls need [`lez-call`](../../lez-prog-call/README.md)** (a checkout at `../../lez-prog-call`, or on `PATH`) and the wallet's `program call` subcommand (LEZ branch `jzaki/fix-examples`). **Planning them needs [`lez-dryrun`](../lez-dryrun/README.md)**, in `jz-progs/lez-dryrun`; without it, a call is sent as given, unchecked. `b` builds both. [LEZCALL.md](../LEZCALL.md) is their design. Deploys need only the wallet. Without `lez-call`, `r` still runs the stock `run_*` runners, which deploy again on every call.
 
 Everything else the walkthrough needs must already be installed: the RISC Zero toolchain, `just`, and LEZ's build dependencies. prog-tui doesn't use `nix develop`; start it from inside that shell if you build that way.
 
