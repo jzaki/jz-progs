@@ -61,6 +61,12 @@ struct Treasury {
     unissued: u128,
 }
 
+// The state layouts, for the IDL: an alias named `State` or ending in `State` declares one.
+/// The treasury PDA's state.
+type TreasuryState = Treasury;
+/// A holder's state, the seat's included: its balance, empty for zero.
+type BalanceState = u128;
+
 lee_core::actor_entrypoint!(handle_message);
 
 fn handle_message(input: &ReceiveInput, message: Message) -> Response {
@@ -160,11 +166,11 @@ fn assert_from_own_seat(input: &ReceiveInput) {
     );
 }
 
-fn decode_treasury(input: &ReceiveInput) -> Treasury {
+fn decode_treasury(input: &ReceiveInput) -> TreasuryState {
     borsh::from_slice(input.pre_state.as_ref()).expect("the token isn't opened")
 }
 
-fn encode_balance(balance: u128) -> Vec<u8> {
+fn encode_balance(balance: BalanceState) -> Vec<u8> {
     if balance == 0 {
         Vec::new()
     } else {
@@ -172,7 +178,7 @@ fn encode_balance(balance: u128) -> Vec<u8> {
     }
 }
 
-fn decode_balance(data: &[u8]) -> u128 {
+fn decode_balance(data: &[u8]) -> BalanceState {
     if data.is_empty() {
         return 0;
     }

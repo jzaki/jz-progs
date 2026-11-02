@@ -1,7 +1,7 @@
 # Calling any LEZ program from what it is
 
 Three pieces work out a program's interface and the shape of a call to it, then send the call:
-- **`lez-call`** ([jzaki/lez-prog-call](https://github.com/jzaki/lez-prog-call)) is a small standalone CLI. It reads a guest's source for its interface and encodes messages. It links no LEZ crate.
+- **`lez-call`** ([jzaki/lez-prog-call](https://github.com/jzaki/lez-prog-call)) is a small standalone CLI. It generates a program's IDL from its guest's source ([idl.md](https://github.com/jzaki/lez-prog-call/blob/main/idl.md)), and encodes and decodes messages and state with it. It links no LEZ crate.
 - **`lez-dryrun`** ([lez-dryrun/](lez-dryrun/README.md)) runs the call through LEZ's engine locally, against chain state, to work out its actors, signers and evidence.
 - **`wallet program call`** sends exactly the transaction given. It's the one change in LEZ.
 
@@ -33,6 +33,13 @@ The caller supplies only the account to send to, plus a public key for any accou
 ## 2. The interface, from source (`lez-call`)
 
 `lez-call` parses the guest file with `syn`. It finds `actor_entrypoint!(handler)`, takes the type of the handler's second parameter, and lists that enum's variants (or the single type) in Borsh order with their doc comments.
+
+The result is the program's **IDL** (`lez-call idl`), specified in [idl.md](https://github.com/jzaki/lez-prog-call/blob/main/idl.md). Besides the messages, it has:
+- the state's layouts, declared by `…State` aliases or inferred from how `pre_state` is decoded;
+- each message's sends and events;
+- the named types all of these use, resolved through modules, `use` items and other crates (via `cargo metadata`).
+
+Every other command takes the guest's source or a published IDL, and `decode` turns a message, state or event back into named fields. What follows is the form view that `iface --json` derives from the IDL for prog-tui.
 
 **Beyond the variants:**
 - **Local structs inside a parameter** are expanded into their fields in Borsh order, named `param.field`.
@@ -67,7 +74,7 @@ The caller supplies only the account to send to, plus a public key for any accou
 }
 ```
 
-This JSON is the "intermediate file". It is generated whenever it's needed, from a source file in milliseconds. Nobody writes or maintains it, and no program has to change to produce it.
+This JSON is generated whenever it's needed, from a source file in milliseconds, or from a published IDL. Nobody writes or maintains it, and no program has to change to produce it.
 
 **`lez-call` takes a source file, not a program id.**
 - **Why:** finding the source of a deployed program means matching the image id in its on-chain `ProgramHeader` ([program/mod.rs:516](../logos-execution-zone/lee/state_machine/core/src/program/mod.rs#L516)) against each local `.bin`'s. Computing an image id takes risc0, about 135 crates.
@@ -219,6 +226,7 @@ No example program needed a change to be called. Each row was called on a local 
 | ″ · `Mint { to, amount }` | `--to` your account | as above, plus declare `to` for the async `Credit`: key evidence when it's new and in the wallet. A new recipient the wallet has no key for needs `--actor pk:<hex>` |
 | ″ · `Transfer { to, amount }` | `--to` the holder | the holder signs. Declare `to` for `Credit` |
 | ″ · `Init`, `Draw`, `Return`, `Credit` | | hint *internal* |
+| `jz_clock_gate` · `Set { now }`, `SetExact { now }` | `--to`, `now` in Unix ms | declare the clock, `CLOCK_01` under the clock program (undeclared: the dry run adds it). `Set`: `now` no later than the clock, and from the stored next set. `SetExact`: `now` is `CLOCK_01`'s timestamp, and the call must land in the next block |
 | native token · `Transfer` | `--to` the sender, `--message-hex` (it has no guest source) | declare the recipient for `Credit`; prints `wallet auth-transfer send` too |
 
 **One optional program change** (not made): `jz_admin_seat` and `jz_simple_token` could grant the PDA seed when the seat messages its PDA.
@@ -269,4 +277,4 @@ No example program needed a change to be called. Each row was called on a local 
 1. `wallet program call` needs proposing upstream.
 2. Should the seed-grant change to `jz_admin_seat` and `jz_simple_token` go in (§5)?
 3. Private accounts: once LEZ PR #985 lands, the dry run can take private witnesses, and `wallet program call` can take private actors. That's also when `--leave-pending` becomes useful.
-4. How this relates to SPEL v0.4: this answers [SPEL.md](SPEL.md) §7 open question 2 ("which actor it targets, so the CLI can build the transaction") without an IDL. A v0.4 IDL could still emit the §2 JSON, so that `lez-call` reads it instead of parsing the source.
+4. How this relates to SPEL v0.4: `lez-call`'s IDL ([idl.md](https://github.com/jzaki/lez-prog-call/blob/main/idl.md), which maps SPEL's IDL onto it) is the v0.4 IDL. A SPEL v0.4 could emit the same format. Which actor a call targets is still the caller's, with the dry run finding the rest ([SPEL.md](SPEL.md) §7 open question 2).
