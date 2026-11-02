@@ -19,9 +19,9 @@ A public transaction is `Message::new(to, message, actors, nonces, fee, evidence
 |---|---|---|
 | `to`, the root actor | The first delivery. It must be declared | **The caller.** Which account you mean (your seat, a holder, a PDA) is intent, not something to infer |
 | `message` | The handler's Borsh-decoded second parameter | **Source**, by `lez-call` (§2) |
-| `actors` | Every actor that receives a sync message must be declared, or the run fails with `UndeclaredActor` ([execution_state.rs:1146](../logos-execution-zone/lee/state_machine/core/src/execution_state.rs#L1146)). An async message to a declared actor is delivered in the same transaction ([execution_state.rs:1262](../logos-execution-zone/lee/state_machine/core/src/execution_state.rs#L1262)). One to an undeclared actor goes to the mailbox, which needs a recovery binding for its address, or the transaction fails with `UnboundAsyncDestination` ([validated_state_diff/mod.rs:414](../logos-execution-zone/lee/state_machine/src/validated_state_diff/mod.rs#L414)). So in practice a public destination has to be declared | **Dry run**, by `lez-dryrun` (§3) |
-| `nonces`, the signers | A signer's account is `is_authorized` for every program's actor on it ([execution_state.rs:1321](../logos-execution-zone/lee/state_machine/core/src/execution_state.rs#L1321)) | **Dry run.** Source hints let it guess first |
-| `evidence` | An account that is not on chain, does not sign, and is not reached by a matching seed grant must come with `Key` or `Pda` evidence ([execution_state.rs:1089](../logos-execution-zone/lee/state_machine/core/src/execution_state.rs#L1089), [public_backend.rs:104](../logos-execution-zone/lee/state_machine/src/validated_state_diff/public_backend.rs#L104)) | **Dry run**, plus seed candidates for a `Pda` (§3.3), and `pk:<hex>` for a key the wallet doesn't hold |
+| `actors` | Every actor that receives a sync message must be declared, or the run fails with `UndeclaredActor` ([execution_state.rs:1256](../logos-execution-zone/lee/state_machine/core/src/execution_state.rs#L1256)). An async message to a declared actor is delivered in the same transaction ([execution_state.rs:1372](../logos-execution-zone/lee/state_machine/core/src/execution_state.rs#L1372)). One to an undeclared actor goes to the mailbox, which needs a recovery binding for its address, or the transaction fails with `UnboundAsyncDestination` ([validated_state_diff/mod.rs:522](../logos-execution-zone/lee/state_machine/src/validated_state_diff/mod.rs#L522)). So in practice a public destination has to be declared | **Dry run**, by `lez-dryrun` (§3) |
+| `nonces`, the signers | A signer's account is `is_authorized` for every program's actor on it ([execution_state.rs:1431](../logos-execution-zone/lee/state_machine/core/src/execution_state.rs#L1431)) | **Dry run.** Source hints let it guess first |
+| `evidence` | An account that is not on chain, does not sign, and is not reached by a matching seed grant must come with `Key` or `Pda` evidence ([execution_state.rs:1190](../logos-execution-zone/lee/state_machine/core/src/execution_state.rs#L1190), [public_backend.rs:104](../logos-execution-zone/lee/state_machine/src/validated_state_diff/public_backend.rs#L104)) | **Dry run**, plus seed candidates for a `Pda` (§3.3), and `pk:<hex>` for a key the wallet doesn't hold |
 | fee payer | Signs and pays | **The caller** (`PAYER`) |
 
 So inference has two layers:
@@ -78,7 +78,7 @@ This JSON is the "intermediate file". It is generated whenever it's needed, from
 
 ### 3.1 The engine, run locally
 
-The sequencer executes a public transaction as `WholeExecution::new(public_context, TransactionEntry::Sync(root), &[]).execute(&mut backend)` ([validated_state_diff/mod.rs:263](../logos-execution-zone/lee/state_machine/src/validated_state_diff/mod.rs#L263)). `WholeExecution`, `PublicExecutionContext` and the `ExecutionEnvironment` trait are all public. `lez-dryrun` runs the same call with its own environment, `DryRun` (`dry_run.rs`):
+The sequencer executes a public transaction as `WholeExecution::new(public_context, TransactionEntry::Sync(root), Vec::new(), None, &[]).execute(&mut backend)`, with no claims and no in-engine fee transfer ([validated_state_diff/mod.rs:272](../logos-execution-zone/lee/state_machine/src/validated_state_diff/mod.rs#L272)). `WholeExecution`, `PublicExecutionContext` and the `ExecutionEnvironment` trait are all public. `lez-dryrun` runs the same call with its own environment, `DryRun` (`dry_run.rs`):
 
 | `ExecutionEnvironment` method | `DryRun` |
 |---|---|
@@ -121,7 +121,7 @@ The result is the plan: root, declared actors (each with why it's there and how 
 - a signer, or the payer when it's declared → `<account>:sign`
 - `Pda` evidence → `pda:<program>/<seed>`
 - a key given as `pk:` → `pk:<key>`
-- any other declared actor → `<account>`. For a new account whose key it holds, the wallet adds the key evidence itself ([account_manager.rs:879](../logos-execution-zone/lez/wallet/src/account_manager.rs#L879))
+- any other declared actor → `<account>`. For a new account whose key it holds, the wallet adds the key evidence itself ([account_manager.rs:1026](../logos-execution-zone/lez/wallet/src/account_manager.rs#L1026))
 
 So no one but the wallet builds the transaction.
 

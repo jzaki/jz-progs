@@ -35,7 +35,7 @@ Run every command below inside `nix develop`, from the repo root unless a step s
 > **If the RocksDB build fails with `Unable to find libclang`,** point bindgen at the flake's libclang. This happens when a system LLVM is installed, because the dev shell doesn't set `LIBCLANG_PATH`. Run it in each `nix develop` shell before building:
 >
 > ```bash
-> export LIBCLANG_PATH=$(nix eval --raw .#packages.x86_64-linux.wallet.LIBCLANG_PATH)
+> export LIBCLANG_PATH=$(nix eval --raw .#core.LIBCLANG_PATH)
 > ```
 
 ### Testnets

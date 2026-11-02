@@ -545,10 +545,11 @@ pub fn plan(chain: &Chain, request: &Request) -> anyhow::Result<Plan> {
             to: request.root.actor,
             message: request.message.clone(),
         };
-        let result = WholeExecution::new(context, TransactionEntry::Sync(root), &[])
-            .map_err(Failure::Engine)
-            .and_then(|execution| execution.execute(&mut env))
-            .map(|outcome| outcome.public);
+        let result =
+            WholeExecution::new(context, TransactionEntry::Sync(root), Vec::new(), None, &[])
+                .map_err(Failure::Engine)
+                .and_then(|execution| execution.execute(&mut env))
+                .map(|outcome| outcome.public);
         let last = env.deliveries.last().copied();
         match result {
             Err(Failure::Engine(ExecutionError::UndeclaredActor { actor }))
