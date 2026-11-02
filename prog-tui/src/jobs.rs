@@ -753,9 +753,12 @@ pub async fn prepare(ctx: &mut Ctx, request: &CallRequest) -> anyhow::Result<Pre
         .filter(|actor| actor["admission"] == "pda")
         .filter_map(|actor| Some(actor["account"].as_str()?.to_owned()))
         .collect();
+    let wallet_args = strings(&plan["wallet_args"]);
+    lines.push(String::new());
+    lines.extend(wallet_dry_run(ctx, &wallet_args).await);
     let call = PlannedCall {
         name: request.name.clone(),
-        wallet_args: strings(&plan["wallet_args"]),
+        wallet_args,
         changes,
         pdas,
     };
@@ -763,6 +766,41 @@ pub async fn prepare(ctx: &mut Ctx, request: &CallRequest) -> anyhow::Result<Pre
         lines,
         call: Some(call),
     })
+}
+
+/// The wallet's own `--dry-run` of `wallet_args`: the fee at the head of the chain, and whether
+/// the transaction as built (signed, with nonces and the fee declared) would apply or revert.
+/// `lez-dryrun` plans what the call needs but involves no fee, so this is the price check. It
+/// never blocks the call: a revert is shown for the user to weigh.
+async fn wallet_dry_run(ctx: &mut Ctx, wallet_args: &[String]) -> Vec<String> {
+    let mut args = vec!["--dry-run"];
+    args.extend(wallet_args.iter().map(String::as_str));
+    let command = ctx.wallet(&args);
+    let output = match ctx.run_quiet("wallet --dry-run program call", command).await {
+        Ok(output) => output,
+        Err(error) => return vec![format!("wallet --dry-run didn't run: {error}")],
+    };
+    let report = dry_run_report(&output.out);
+    if report.is_empty() {
+        let error = output.out.lines().rev().find(|line| line.starts_with("Error"));
+        return vec![format!(
+            "wallet --dry-run gave no report: {}",
+            error.unwrap_or("rebuild the wallet (key b)")
+        )];
+    }
+    let mut lines = vec!["wallet --dry-run (the transaction as it would be sent):".to_owned()];
+    lines.extend(report.iter().map(|line| format!("  {}", line.trim_end())));
+    if report.iter().any(|line| line.contains("action REVERTS")) {
+        lines.push("⚠ it would revert: its fee is still charged".to_owned());
+    }
+    lines
+}
+
+/// The lines of the wallet's `Dry run: …` report, without the rest of its output.
+fn dry_run_report(output: &str) -> Vec<&str> {
+    let mut lines = output.lines().skip_while(|line| !line.starts_with("Dry run:"));
+    lines.next();
+    lines.take_while(|line| line.starts_with("  ")).collect()
 }
 
 /// Plans `request`; the plan goes to the UI, to confirm before [`call`] sends it.
@@ -1208,6 +1246,16 @@ mod tests {
         assert_eq!(parse_amount("0"), None);
         assert_eq!(parse_amount("-5"), None);
         assert_eq!(parse_amount("ten"), None);
+    }
+
+    #[test]
+    fn dry_run_report_is_the_wallets_indented_lines() {
+        let output = "noise\nDry run: nothing sent\n  fee payer:        A\n  action:           applies\nlater\n";
+        assert_eq!(
+            dry_run_report(output),
+            ["  fee payer:        A", "  action:           applies"]
+        );
+        assert!(dry_run_report("Error: no").is_empty());
     }
 
     #[test]
