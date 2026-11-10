@@ -1070,6 +1070,12 @@ impl App {
         match form.action {
             FormAction::NewAccount => {
                 let label = values[0].clone();
+                // The wallet refuses these too: they separate the parts of a call's actor.
+                if let Some(reserved) = label.chars().find(|c| ['@', ':', '/'].contains(c)) {
+                    self.push_log(format!("✗ a label can't contain {reserved:?}: @ : / are reserved"));
+                    self.modal = Modal::Form(form);
+                    return;
+                }
                 self.spawn_job("new account", move |mut ctx| async move {
                     let id = jobs::new_account(&mut ctx, &label).await?;
                     ctx.log(format!("new account {id}"));

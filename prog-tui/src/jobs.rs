@@ -1064,7 +1064,7 @@ pub async fn runner(ctx: &mut Ctx, args: &[String]) -> anyhow::Result<()> {
         }
     } else {
         ctx.log(format!(
-            "the runner printed {} program id(s) for {} guest(s): not registering them. Rebuild (key b) if the runner is older than its "Deployed Program with" lines",
+            "the runner printed {} program id(s) for {} guest(s): not registering them. Rebuild (key b) if the runner is older than its `Deployed Program with` lines",
             ids.len(),
             guests.len()
         ));

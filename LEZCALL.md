@@ -202,6 +202,7 @@ same call by hand:
 - **What it takes:** the message already Borsh-encoded, and every actor named.
 - **How it sends:** through the wallet's own `WalletCore::send_pub_tx_paid_by`.
 - **Accounts:** a wallet key path (`m/…`) also works as an account there.
+- **Labels:** a wallet label can't contain `@`, `:` or `/`. Those separate the parts of an actor (`<account>@<program>:sign`, `pda:<owner>/<seed>`), so the wallet refuses them when a label is created.
 - **Seeds:** 0x hex or base58. The wallet has no source, so it doesn't know seed constants' names; `lez-call call` puts their bytes in.
 
 For the native token, `lez-dryrun` also prints the real `wallet auth-transfer send …`.
