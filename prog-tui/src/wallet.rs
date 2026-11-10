@@ -72,13 +72,13 @@ pub fn parse_json_line(output: &str, prefix: &str) -> Option<serde_json::Value> 
         .and_then(|json| serde_json::from_str(json).ok())
 }
 
-/// Every program id a runner deployed, in order, from its `PROG_CLI {"program_id":…}` lines
+/// Every program id a runner deployed, in order, from its `Deployed Program with {"program_id":…}` lines
 /// (`program_deployment::deploy_program` prints them). A runner that deploys two programs
 /// (caller, then callee) prints two.
 pub fn parse_program_ids(output: &str) -> Vec<String> {
     output
         .lines()
-        .filter_map(|line| line.strip_prefix("PROG_CLI "))
+        .filter_map(|line| line.strip_prefix("Deployed Program with "))
         .filter_map(|json| serde_json::from_str::<serde_json::Value>(json).ok())
         .filter_map(|value| value["program_id"].as_str().map(str::to_owned))
         .collect()
@@ -133,10 +133,10 @@ mod tests {
 
     #[test]
     fn parses_every_program_id_in_order() {
-        let output = "PROG_CLI {\"program_id\":\"CALLER\"}\n\
+        let output = "Deployed Program with {\"program_id\":\"CALLER\"}\n\
                       Transaction hash is ab\n\
-                      PROG_CLI {\"program_id\":\"CALLEE\"}\n\
-                      PROG_CLI {\"tx\":\"x\",\"block\":3}\n";
+                      Deployed Program with {\"program_id\":\"CALLEE\"}\n\
+                      Deployed Program with {\"tx\":\"x\",\"block\":3}\n";
         assert_eq!(parse_program_ids(output), ["CALLER", "CALLEE"]);
         assert!(parse_program_ids("nothing").is_empty());
     }

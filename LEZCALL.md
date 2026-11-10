@@ -270,7 +270,7 @@ No example program needed a change to be called. Each row was called on a local 
 
 **Leftovers on the branch:**
 - `prog_cli` is deleted.
-- `deploy_program` (`examples/program_deployment/src/lib.rs`) still prints its `PROG_CLI {"program_id":…}` line, which prog-tui reads from the stock runners' output.
+- `deploy_program` (`examples/program_deployment/src/lib.rs`) still prints its `Deployed Program with {"program_id":…}` line, which prog-tui reads from the stock runners' output.
 
 ## 8. Open questions
 
