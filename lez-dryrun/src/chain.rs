@@ -94,7 +94,7 @@ impl Chain {
     /// The header of the program deployed at `program`.
     pub fn header(&self, program: AccountId) -> anyhow::Result<Option<ProgramHeader>> {
         let state = self.actor_state(Actor::new(program, PROGRAM_LOADER_ACCOUNT_ID))?;
-        Ok(ProgramHeader::from_bytes(state.as_ref()))
+        Ok(ProgramHeader::from_loader_actor_state(state.as_ref()))
     }
 
     /// The program deployed at `program`, read from its loader states.
@@ -105,7 +105,7 @@ impl Chain {
         let loader = |account_id| Actor::new(account_id, PROGRAM_LOADER_ACCOUNT_ID);
         let mut states = HashMap::new();
         let header_state = self.actor_state(loader(program))?;
-        let loaded = match ProgramHeader::from_bytes(header_state.as_ref()) {
+        let loaded = match ProgramHeader::from_loader_actor_state(header_state.as_ref()) {
             None => None,
             Some(header) => {
                 states.insert(program, header_state);
@@ -116,7 +116,7 @@ impl Chain {
                         "program {program} has more than {MAX_PROGRAM_SEGMENTS} segments"
                     );
                     let state = self.actor_state(loader(segment_id))?;
-                    let segment = ProgramSegment::from_bytes(state.as_ref())
+                    let segment = ProgramSegment::from_loader_actor_state(state.as_ref())
                         .with_context(|| format!("segment {segment_id} of program {program}"))?;
                     next = segment.next_segment;
                     states.insert(segment_id, state);

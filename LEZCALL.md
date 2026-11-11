@@ -9,7 +9,7 @@ prog-tui uses all three to list a program's messages, plan calls, send them, and
 
 These replace `prog_cli`, whose subcommands (`hello`, `move-write`, `tail`, `pda`, …) each hard-coded one example program. They also replace `lezcall`, which did all of this inside LEZ's `examples/program_deployment` and so pulled in the wallet crate, the engine and risc0.
 
-Status: built, on LEZ `jzaki/fix-examples` (LEZ `dev` merged at `850886286`). Public accounts only.
+Status: built, on LEZ `dev` (checked at `680eb56b3`). Public accounts only.
 
 ## 1. What a public call needs
 
@@ -197,7 +197,7 @@ same call by hand:
 
 ### `wallet program call`
 
-`wallet program call` is in [cli/programs/program.rs](../logos-execution-zone/lez/wallet/src/cli/programs/program.rs), on the LEZ branch `jzaki/fix-examples`. It's the only change to LEZ that this needs.
+`wallet program call` is in [cli/programs/program.rs](../logos-execution-zone/lez/wallet/src/cli/programs/program.rs), on LEZ `dev` since PR #989. It's the only change to LEZ that this needs.
 
 - **What it takes:** the message already Borsh-encoded, and every actor named.
 - **How it sends:** through the wallet's own `WalletCore::send_pub_tx_paid_by`.

@@ -10,7 +10,7 @@ How to build, deploy and call a first LEZ program from the LEZ repo itself, on e
 
 Sources:
 
-- `logos-blockchain/logos-execution-zone` on `dev` (checked at `93af39c8b`, 2026-10-28) for v0.4, run from branch `jzaki/fix-examples` (`850886286`, which adds runner fixes on top of `93af39c8b`), and tags **v0.2.4** and **v0.3.0** for the older sections. `../logos-execution-zone` is the local checkout. Files used: `Justfile`, `flake.nix`, `rust-toolchain.toml`, `examples/program_deployment/`, `lez/wallet/`, `lez/programs/`.
+- `logos-blockchain/logos-execution-zone` on `dev` (checked at `680eb56b3`, 2026-11-11, which merges the runner fixes of PR #989) for v0.4, and tags **v0.2.4** and **v0.3.0** for the older sections. `../logos-execution-zone` is the local checkout. Files used: `Justfile`, `flake.nix`, `rust-toolchain.toml`, `examples/program_deployment/`, `lez/wallet/`, `lez/programs/`.
 - `logos-co/logos-docs` [Journey] issues #506–#511 and #514, the LEZ developers' notes for testnet v0.3. Issue numbers like `#514` refer to these, and LEZ PRs are written "PR 875".
 - `logos-co/logos-docs` branch `docs/zone-endpoint-ref`, file `docs/get-started/testnet-endpoints.md` (commit `de03a2b0`, unmerged at the time of writing, so it may move): the RPC, explorer, release and channel for each testnet. Section 1 copies the rows used here. If they differ, that page wins.
 - The actor-model manual on LEZ branch `moudy/guide-mdbook-fixes` (`docs/actor-program-development-book/`; first written on `schouhy/lez-guide-mdbook`). Section 4 links to it instead of repeating it.
@@ -245,7 +245,7 @@ $WALLET account get --raw --scope all --account-id "Public/$ACCOUNT"   # shard h
 
 ## 4. LEZ v0.4: the actor model on `dev` (local)
 
-> **Not released.** There is no v0.4 tag or testnet yet. The endpoints page lists 0.4 as TBD, so local is the only option for now. This is the actor model that PR #935 merged into LEZ `dev`, checked at `93af39c8b`. Build against `dev` and expect names to move. The steps below follow the code. The local run was tried on 2026-10-16 on branch `jzaki/fix-examples` (`be940d8f8`), which fixes the example runners. The deploy and the hello-world call both work there.
+> **Not released.** There is no v0.4 tag or testnet yet. The endpoints page lists 0.4 as TBD, so local is the only option for now. This is the actor model that PR #935 merged into LEZ `dev`, checked at `680eb56b3`. Build against `dev` and expect names to move. The steps below follow the code. The deploy and the hello-world call both work on `dev`, which has the example runner fixes since PR #989.
 
 **The idea.** A program no longer rewrites accounts or plans effects. It is a handler that receives **one message** addressed to **one actor**, and an actor is one program's state on one account. The handler sees only that state, and returns the new state plus any messages it wants to send to other actors.
 
@@ -276,7 +276,7 @@ For what `ReceiveInput` and `Response` contain, and how sync and async messages 
 
 ### Run it locally
 
-Do section 1 first, with `git checkout jzaki/fix-examples` for the tag. That branch is `dev` at `93af39c8b` plus fixes to the example runners (see the note below the runner). The pinned Rust is 1.98.1.
+Do section 1 first, with `git checkout dev` for the tag. The pinned Rust is 1.98.1.
 
 ```bash
 # Terminal 1: local sequencer, listening on 127.0.0.1:3040 by default. Dev mode skips proving.
@@ -302,10 +302,9 @@ Then build the guests (section 1) and run the hello-world runner. It deploys the
 
 **Expect a lot of output.** The runner, like `wallet program-loader deploy`, prints every transaction in full, including the program bytes in each segment upload. That comes to about 1 MB of numbers in the terminal, and it's normal. The lines to look for are `Transaction hash is …` and `Transaction is included in block N`. For hello world there are four pairs, one per deploy transaction: three segments and the header. The call itself prints nothing. To see only those, pipe the output through `grep -E 'Transaction (hash|is included)|rror|panicked'`.
 
-> **On `dev` (`93af39c8b`) this runner fails. Use branch `jzaki/fix-examples`, which fixes it.** On `dev`, the deploy miscounts segments (`SegmentCountMismatch`), the call declares no fee (`MissingFeeDeclaration`), and a fresh `ACCOUNT` isn't admitted, so the call reverts with `UnadmittedPublicActor`. The branch's commits fix all three. Their messages and diffs explain each change.
+> **Before PR #989 (`dev` at `93af39c8b`) this runner failed.** The deploy miscounted segments (`SegmentCountMismatch`), the call declared no fee (`MissingFeeDeclaration`), and a fresh `ACCOUNT` wasn't admitted, so the call reverted with `UnadmittedPublicActor`. PR #989 fixed all three on `dev`. If you see those errors, update your checkout.
 >
-> - **What the branch covers.** The fee fix is in every `run_*` runner. The admission fix is only in `run_hello_world`. The other runners haven't been tried, so they may still revert on a fresh account that doesn't sign the call.
-> - **Check the call yourself.** The runner doesn't check the call's result, even on the branch. A failed call still exits cleanly, so check the account (below).
+> - **Check the call yourself.** The runner doesn't check the call's result. A failed call still exits cleanly, so check the account (below).
 
 Check the result. `--scope all` asks the sequencer for the whole account (`getAccount`), with every program's actor state listed separately:
 
@@ -352,7 +351,7 @@ Every file in the guest's `src/bin/` becomes a program, and every file in the ru
 
 1. **Copy the program.** Copy `hello_world.rs` (or `hello_world_with_move_function.rs`, for several message types) to `my_program.rs` in the same folder.
 2. **Define the message.** Use a borsh `enum Message` with one variant per operation. Guard any variant meant only for your own program with `input.from_own_program()`.
-3. **Copy a runner.** On `jzaki/fix-examples`, copy `run_hello_world.rs` to `run_my_program.rs`, then change it to send the message you defined. The branch's version already declares the fee and admits `ACCOUNT`.
+3. **Copy a runner.** Copy `run_hello_world.rs` to `run_my_program.rs`, then change it to send the message you defined. It already declares the fee and admits `ACCOUNT`.
 4. **Rebuild and deploy.** A code change gives the program a new image ID. Redeploy to a new header, or update the existing one with `wallet program-loader update`.
 5. **Test the handler without a chain.** Build a `ReceiveInput` by hand and call the handler. The manual's `foundations/toolchain.md` shows how, and `lez/programs/clock/src/main.rs` has a worked example.
 
@@ -400,7 +399,7 @@ These are meant to be read and copied. Guests are in `methods/guest/src/bin/`, a
 | `simple_tail_call.rs` | Composition: sends a sync message to `hello_world`. The callee is passed in the message | `run_hello_world_through_tail_call`, `…_private` |
 | `tail_call_with_pda.rs` | A program-derived account authorized by seed through a sync message to `hello_world_with_authorization` | `run_hello_world_with_authorization_through_tail_call_with_pda` |
 
-`examples/program_deployment/README.md` is a tutorial, but it **lags the code**. It still says `wallet deploy-program <bin>`, and on `dev` the runners it describes lack the fee fix, which is on branch `jzaki/fix-examples`. Its account-inspection steps (`wallet account get --raw --scope all`, decoding the hex) are still correct.
+`examples/program_deployment/README.md` is a tutorial that walks the same runners, updated for fees and the program loader in PR #989.
 
 ### The native token: `lee/state_machine/core/src/native_token.rs`
 

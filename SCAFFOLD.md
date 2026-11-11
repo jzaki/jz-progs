@@ -24,7 +24,7 @@ Section 7 maps each part onto v0.4 without proposing a design.
 | `logos-co/scaffold` PR #199, "rename lez-framework to spel; delegate scaffolding to spel init" | branch `feat/spel-template` at `efb7620` (2026-10-12), open since 2026-06-02 | The SPEL v0.7 / LEZ v0.2.4 port |
 | `logos-co/spel` | tag `v0.5.0` (`73fc462`) | The SPEL that scaffold pins. SPEL.md covers SPEL `main` |
 | `logos-blockchain/logos-execution-zone` | tags `v0.1.2`, `v0.2.4`, `v0.3.1` | What scaffold and its PRs build against |
-| `logos-blockchain/logos-execution-zone` | `jzaki/fix-examples` (`850886286`) | v0.4 contrast, using `dev` names |
+| `logos-blockchain/logos-execution-zone` | `dev` (`680eb56b3`) | v0.4 contrast |
 
 I read the two PRs from their branches. Their numbers, titles and authors come from the repo's GitHub pull-request list, read on 2026-10-22. Nothing here was run: every claim comes from reading code and docs.
 
@@ -70,7 +70,7 @@ PR #273 changes 86 files: 4,718 lines added and 7,846 removed.
 | A call that fails in the guest | Not included (*inferred*: v0.1.2 has no `is_chargeable`) | Included, charged and reverted (`LeeError::is_chargeable`) | Included, charged and reverted |
 | Circuits | Scaffold downloads release 0.4.1 | LEZ's build fetches its own, and PR #273 deletes scaffold's code for it | Not checked |
 
-The v0.4 column comes from LEZ on `jzaki/fix-examples`:
+The v0.4 column comes from LEZ on `dev`:
 - `lez/sequencer/service/src/main.rs` and `lez/sequencer/service/rpc/src/lib.rs`;
 - `lez/wallet/src/cli/`;
 - `lee/state_machine/src/error.rs:105`;
@@ -338,7 +338,7 @@ The middle column is what scaffold runs at the v0.1.2 pin (*implied*, from the c
 
 | Step | With scaffold | What scaffold runs (v0.1.2) | By hand on `dev` |
 |---|---|---|---|
-| Get LEZ | `lgs new my-app` | Clone LEZ into the cache at the pin; copy `examples/program_deployment`; render the overlay | `git clone`, `git checkout jzaki/fix-examples`, `nix develop` |
+| Get LEZ | `lgs new my-app` | Clone LEZ into the cache at the pin; copy `examples/program_deployment`; render the overlay | `git clone`, `nix develop` |
 | Build the tools | `lgs run`, step 1 (through `setup`) | `cargo build --release --features standalone -p sequencer_service`, `-p wallet`, and `-p spel` in the spel checkout | `just` builds them on first use |
 | Start a chain | Step 3 | `./target/release/sequencer_service <patched config>` under `setsid`; wait for the port | `just clean`, then `RISC0_DEV_MODE=1 just run-sequencer-standalone` in its own terminal |
 | Fund a wallet | `setup` seeds it, step 4 tops it up | `wallet account get`, `auth-transfer init`, `pinata claim --to <default>` | `just run-wallet check-health`, `just wallet-import-test-accounts`, `account new public`; export `LEE_WALLET_HOME_DIR`, `PAYER` and `ACCOUNT` |
@@ -374,7 +374,7 @@ The program id is `program.id()`, the image id of the ELF embedded in the runner
 
 Its ADR: "Drop the overlay once upstream examples pay fees."
 
-**`dev`: LEZ's own runner on `jzaki/fix-examples`** (`examples/program_deployment/src/bin/run_hello_world.rs:55-85`, trimmed). It deploys through the program loader, then builds the call with a fee and admission evidence:
+**`dev`: LEZ's own runner** (`examples/program_deployment/src/bin/run_hello_world.rs:55-79`, trimmed). It deploys through the program loader, then builds the call with a fee and admission evidence:
 
 ```rust
 // Deploy the program through `program_loader`; future calls dispatch to the returned header.
@@ -387,9 +387,9 @@ let hello = Actor::new(account_id, program_account_id);
 // as a public actor with evidence: its public key, which hashes to the account id. Without
 // it the call reverts with `UnadmittedPublicActor`, but is still included and charged.
 let message = Message {
-    admission_evidence: vec![PublicAccountEvidence::Key(PublicKey::new_from_private_key(
-        account_key,
-    ))],
+    admission_evidence: admission_evidence(&wallet_core, account_id)
+        .into_iter()
+        .collect(),
     ..Message::try_new_with_fees(hello, vec![hello], nonces, greeting, fee).unwrap()
 };
 ```
@@ -596,7 +596,7 @@ These are observations, not a design.
 | Part | `master` (v0.1.2) | PR #273 (v0.3.1) | `dev` (v0.4) | Outcome |
 |---|---|---|---|---|
 | Pins, cache, `doctor` | Commit pins, built locally | Same | Same mechanism | Keep |
-| `new`, default template | LEZ's example plus v0.1.2 runners | LEZ's example plus fee-paying runners | `dev`'s example is already actor code. Its runners need the three fixes on `jzaki/fix-examples`: segment count, fee, admission | Changed. Keep LEZ's runners once they're fixed upstream, or overlay fixed ones |
+| `new`, default template | LEZ's example plus v0.1.2 runners | LEZ's example plus fee-paying runners | `dev`'s example is already actor code, and its runners have the segment count, fee and admission fixes (PR #989) | Changed. Keep LEZ's runners |
 | Tail-call id patch | Writes the image id | Does nothing | Does nothing | Gone |
 | `build`, Docker guests | Image id is the program id | Image id still matters for private execution | Same as v0.3.1 | Keep |
 | localnet and test-node start | Config as an argument, patched | `--port --listen-address --home` | `setup <home> --config --funding-public-key`, then `start <home> --rpc-listen-address` | Changed again |
@@ -618,4 +618,4 @@ These are observations, not a design.
 4. **How is a v0.4 project's IDL built?** `spel generate-idl` from source, PR #199's route, avoids the duplicate host copy. A v0.4 program has one handler and one message type, which prog-tui already reads from the source by finding `actor_entrypoint!` ([prog-tui/README.md](prog-tui/README.md)). Does that make a source-read IDL enough?
 5. **How should scaffold report a reverted call on v0.4?** From the resulting state, from events, or from a receipt that LEZ would have to add?
 6. **Who admits accounts?** On `dev`, a public account that isn't on chain yet needs admission evidence. The templates and `wallet topup` must either supply it or create accounts that are already admitted.
-7. **Which LEZ ref should a v0.4 template pin?** `dev` moves and has no tag, and its runners fail without the fixes on `jzaki/fix-examples`.
+7. **Which LEZ ref should a v0.4 template pin?** `dev` moves and has no tag. Its runners work from PR #989 (`680eb56b3`) on.
