@@ -32,6 +32,8 @@ pub struct SeqStatus {
     /// Pid of whatever listens on the sequencer's port.
     pub listener: Option<i32>,
     pub block: Option<u64>,
+    /// The channel id the sequencer reports (`getChannelId`), as hex.
+    pub channel_id: Option<String>,
 }
 
 /// How to stop a running sequencer.
@@ -331,6 +333,7 @@ mod tests {
             managed: Some(4242),
             listener: Some(4243),
             block: Some(7),
+            channel_id: None,
         };
         let help = sequencer_help(Path::new("/s/it's"), "http://127.0.0.1:3040", &seq).join("\n");
         assert!(help.contains("tail -f '/s/it'\\''s/sequencer.log'"));
@@ -348,6 +351,7 @@ mod tests {
             managed: None,
             listener: Some(4243),
             block: None,
+            channel_id: None,
         };
         let help = sequencer_help(Path::new("/s"), "http://127.0.0.1:3040", &seq).join("\n");
         assert!(help.contains("kill -INT 4243   (started outside prog-tui)"));

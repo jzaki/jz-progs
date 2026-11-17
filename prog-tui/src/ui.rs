@@ -11,6 +11,7 @@ use ratatui::{
 use crate::{
     app::{AccountRow, App, Focus, Modal},
     jobs::{StepState, short},
+    network::{NETWORKS_FILE, Network},
     rpc::{NATIVE_TOKEN, describe_bytes, format_balance},
     state::Origin,
 };
@@ -267,6 +268,11 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
 
     let seq = &app.status.seq;
     let (dot, state) = match (seq.healthy, seq.managed, seq.port_open) {
+        _ if !app.network.is_local() => match (seq.healthy, seq.port_open) {
+            (true, _) => (Span::raw("●").green(), "reachable".to_owned()),
+            (false, true) => (Span::raw("◐").yellow(), "answers, but not healthy".to_owned()),
+            (false, false) => (Span::raw("○").red(), "unreachable".to_owned()),
+        },
         (true, Some(pgid), _) => (Span::raw("●").green(), format!("running (prog-tui, pgid {pgid})")),
         (true, None, _) => (
             Span::raw("●").green(),
@@ -278,11 +284,28 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         (false, Some(_), _) | (false, None, true) => (Span::raw("◐").yellow(), "starting…".into()),
         (false, None, false) => (Span::raw("○").red(), "stopped".into()),
     };
-    let mut second = vec![Span::raw("SEQ ").bold(), dot, Span::raw(format!(" {state}"))];
+    let mut second = match &app.network {
+        Network::Local => vec![Span::raw("SEQ ").bold(), dot, Span::raw(format!(" {state}"))],
+        Network::Remote { name, .. } => vec![
+            Span::raw("NET ").bold(),
+            Span::raw(format!("{name} ")).magenta().bold(),
+            dot,
+            Span::raw(format!(" {state}")),
+        ],
+    };
     if let Some(block) = seq.block {
         second.push(Span::raw(format!(" · block {block}")));
     }
     second.push(Span::raw(format!(" · {}", app.rpc.url)).dark_gray());
+    if let Network::Remote { channel_id: Some(expected), .. } = &app.network {
+        match &seq.channel_id {
+            Some(reported) if reported == expected => second.push(Span::raw(" · channel ✓").green()),
+            Some(reported) => second.push(
+                Span::raw(format!(" · channel {}… ≠ networks.json", &reported[..8.min(reported.len())])).red(),
+            ),
+            None => {}
+        }
+    }
     second.push(Span::raw("   PAYER ").bold());
     second.push(Span::raw(app.saved.payer.as_deref().map_or("-".into(), short)));
     second.push(Span::raw("  ACCOUNT ").bold());
@@ -656,7 +679,7 @@ fn draw_keys(frame: &mut Frame, area: Rect, app: &App) {
     };
     frame.render_widget(
         Paragraph::new(format!(
-            " {context} │ W walkthrough · s seq start/stop · e seq cmds · R reset · b build · i wallet init · Tab pane · ? help · q quit"
+            " {context} │ W walkthrough · s seq start/stop · e seq cmds · R reset · b build · i wallet init · N network · Tab pane · ? help · q quit"
         ))
         .dark_gray(),
         area,
@@ -666,8 +689,8 @@ fn draw_keys(frame: &mut Frame, area: Rect, app: &App) {
 fn draw_help(frame: &mut Frame) {
     let keys = [
         ("W", "walkthrough: build, reset, wallet, PAYER/ACCOUNT, deploy token, create a token"),
-        ("s", "start the sequencer, or stop it (asks first if prog-tui didn't start it)"),
-        ("R", "reset: stop, `just clean`, start (wipes the chain and the wallet)"),
+        ("s", "start the sequencer, or stop it (asks first if prog-tui didn't start it); local only"),
+        ("R", "reset: stop, `just clean`, start (wipes the chain and the wallet); local only"),
         ("b", "build the wallet, lez-programs' programs + IDLs, the jz guests, spel, lez-call, lez-dryrun"),
         ("i", "initialise the wallet and import the two funded test accounts"),
         ("n", "new public account"),
@@ -682,6 +705,7 @@ fn draw_help(frame: &mut Frame) {
         ("h", "show or hide the header/segment accounts that deploys create"),
         ("e", "shell commands for the sequencer (log, wallet, stop) and the env.sh to source"),
         ("L", "change the LEZ and lez-programs checkouts"),
+        ("N", "back to the network selector: local standalone, or one from networks.json"),
         ("g", "refresh now"),
         ("Tab / ←→", "switch pane (Accounts, Guests, Deployed, Built-in); ↑↓ or j/k select"),
         ("q", "quit (the sequencer keeps running)"),
@@ -701,4 +725,65 @@ fn draw_help(frame: &mut Frame) {
         Paragraph::new(lines).block(Block::bordered().title(" Keys (any key closes) ")),
         area,
     );
+}
+
+/// The network selector prog-tui opens on: local standalone, then each sequencer in
+/// `networks.json`.
+pub fn draw_selector(frame: &mut Frame, choices: &[Network], selected: usize, error: Option<&str>) {
+    let mut items: Vec<ListItem> = Vec::new();
+    for (index, network) in choices.iter().enumerate() {
+        let number = if index < 9 { format!("{} ", index + 1) } else { "  ".to_owned() };
+        let line = match network {
+            Network::Local => Line::from(vec![
+                Span::raw(number),
+                Span::raw("local standalone").bold(),
+                Span::raw("  127.0.0.1:3040; prog-tui starts, stops and resets it").dark_gray(),
+            ]),
+            Network::Remote { name, url, channel_id } => Line::from(vec![
+                Span::raw(number),
+                Span::raw(name.clone()).magenta().bold(),
+                Span::raw(format!("  {url}")),
+                Span::raw(match channel_id {
+                    Some(id) => format!("  channel {}…{}", &id[..8], &id[56..]),
+                    None => String::new(),
+                })
+                .dark_gray(),
+            ]),
+        };
+        items.push(ListItem::new(line));
+    }
+    let mut notes = vec![
+        Line::from(format!(
+            "Remote networks come from prog-tui/{NETWORKS_FILE}; each keeps its own wallet and state."
+        ))
+        .dark_gray(),
+    ];
+    if choices.len() == 1 && error.is_none() {
+        notes.push(Line::from(format!("No {NETWORKS_FILE}: only the local chain to choose.")).dark_gray());
+    }
+    if let Some(error) = error {
+        notes.push(Line::from(format!("✗ {error}")).red());
+    }
+    let list_height = u16::try_from(items.len()).unwrap_or(10);
+    let notes_height = u16::try_from(notes.len()).unwrap_or(2);
+    let area = centered(frame.area(), 100, list_height + notes_height + 4);
+    frame.render_widget(Clear, area);
+    let block = Block::bordered()
+        .title(" prog-tui: which network? ")
+        .title_bottom(" Enter or 1–9 choose · ↑↓ select · q quit ")
+        .border_style(Color::Cyan);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let [list_area, _, notes_area] = Layout::vertical([
+        Constraint::Length(list_height),
+        Constraint::Length(1),
+        Constraint::Min(1),
+    ])
+    .areas(inner);
+    frame.render_stateful_widget(
+        List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+        list_area,
+        &mut ListState::default().with_selected(Some(selected)),
+    );
+    frame.render_widget(Paragraph::new(notes).wrap(Wrap { trim: false }), notes_area);
 }

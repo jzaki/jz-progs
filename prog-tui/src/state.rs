@@ -65,6 +65,9 @@ pub struct Saved {
     pub wallet_password: String,
     pub deployments: Vec<Deployment>,
     pub watched: Vec<Watched>,
+    /// The network chosen last time (`Network::key`), which the selector starts on. Only the root
+    /// state's counts.
+    pub last_network: Option<String>,
 }
 
 impl Default for Saved {
@@ -77,6 +80,7 @@ impl Default for Saved {
             wallet_password: "prog-tui".to_owned(),
             deployments: Vec::new(),
             watched: Vec::new(),
+            last_network: None,
         }
     }
 }
@@ -98,6 +102,15 @@ impl Saved {
         )?;
         fs::write(env_sh_path(state_dir), env_sh(self, lez, programs))?;
         Ok(())
+    }
+
+    /// Takes the settings every network shares from `root` (the root state's): the checkouts and
+    /// the wallet password. The rest (`PAYER`, `ACCOUNT`, deployments, watched accounts) belongs
+    /// to one chain.
+    pub fn share_settings_from(&mut self, root: &Saved) {
+        self.lez_dir.clone_from(&root.lez_dir);
+        self.programs_dir.clone_from(&root.programs_dir);
+        self.wallet_password.clone_from(&root.wallet_password);
     }
 
     pub fn program_name(&self, program_id: &str) -> Option<&str> {
@@ -132,6 +145,17 @@ impl Saved {
 
 pub fn env_sh_path(state_dir: &Path) -> PathBuf {
     state_dir.join("env.sh")
+}
+
+/// Where a network's state lives: the root `.state/` for the local chain (where it always has), and
+/// `.state/networks/<key>/` for a remote one. Each holds that chain's `state.json`, `env.sh` and
+/// job logs.
+pub fn network_state_dir(root: &Path, network_key: &str) -> PathBuf {
+    if network_key == "local" {
+        root.to_path_buf()
+    } else {
+        root.join("networks").join(network_key)
+    }
 }
 
 /// Resolves a checkout's directory as entered against this crate's directory, expanding a

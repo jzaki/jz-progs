@@ -16,6 +16,7 @@ use crate::{
     jobs::{self, CallRequest, Ctx, Msg, Planned, Status, StepState},
     lez::Lez,
     lez_call::{self, Method, Seed},
+    network::Network,
     programs::{Guest, Programs},
     rpc::{AccountView, Rpc},
     sequencer::{self, StopTarget},
@@ -155,6 +156,11 @@ pub struct App {
     rt: Handle,
     tx: UnboundedSender<Msg>,
     crate_dir: PathBuf,
+    /// The chain prog-tui works against, chosen in the selector at startup.
+    pub network: Network,
+    /// `.state/`: the local chain's state, and the settings every network shares.
+    root_state_dir: PathBuf,
+    /// This network's state: `root_state_dir` for local, `.state/networks/<key>/` otherwise.
     pub state_dir: PathBuf,
     pub saved: Saved,
     pub lez: Lez,
@@ -181,6 +187,8 @@ pub struct App {
     pub checklist: Vec<(String, StepState)>,
     pub modal: Modal,
     pub quit: bool,
+    /// Quit back to the network selector rather than out of prog-tui (key N).
+    pub switch_network: bool,
     pub ticks: usize,
     refreshing: Refreshing,
     last_status: Option<Instant>,
@@ -196,17 +204,32 @@ struct Refreshing {
 }
 
 impl App {
-    pub fn new(rt: Handle, tx: UnboundedSender<Msg>) -> Self {
+    pub fn new(rt: Handle, tx: UnboundedSender<Msg>, network: Network) -> Self {
         let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let state_dir = crate_dir.join(".state");
-        let saved = Saved::load(&state_dir);
-        let lez = Lez::new(state::resolve_dir(&crate_dir, &saved.lez_dir));
+        let root_state_dir = crate_dir.join(".state");
+        let state_dir = state::network_state_dir(&root_state_dir, &network.key());
+        let mut root = Saved::load(&root_state_dir);
+        root.last_network = Some(network.key());
+        let saved = if network.is_local() {
+            root.clone()
+        } else {
+            let mut saved = Saved::load(&state_dir);
+            saved.share_settings_from(&root);
+            saved
+        };
         let programs = Programs::new(state::resolve_dir(&crate_dir, &saved.programs_dir));
-        let rpc = Rpc::new(lez.sequencer_url());
+        if !network.is_local() {
+            // Remember the choice in the root state; the local chain's own state is untouched.
+            let local = Lez::new(state::resolve_dir(&crate_dir, &root.lez_dir));
+            let _ = root.save(&root_state_dir, &local, &programs);
+        }
+        let (lez, rpc, wallet_error) = connect(&network, &crate_dir, &saved.lez_dir, &state_dir);
         let mut app = Self {
             rt,
             tx,
             crate_dir,
+            network,
+            root_state_dir,
             state_dir,
             saved,
             lez,
@@ -230,6 +253,7 @@ impl App {
             checklist: Vec::new(),
             modal: Modal::None,
             quit: false,
+            switch_network: false,
             ticks: 0,
             refreshing: Refreshing::default(),
             last_status: None,
@@ -239,10 +263,20 @@ impl App {
         app.guests = app.programs.guests();
         app.save();
         app.push_log(format!(
-            "prog-tui · LEZ at {} · lez-programs at {} · press ? for keys",
+            "prog-tui · {} · LEZ at {} · lez-programs at {} · press ? for keys",
+            app.network.label(),
             app.lez.dir.display(),
             app.programs.dir.display()
         ));
+        if !app.network.is_local() {
+            app.push_log(format!(
+                "remote network: its own wallet at {}; prog-tui doesn't start, stop or reset its sequencer",
+                app.lez.wallet_home().display()
+            ));
+        }
+        if let Some(error) = wallet_error {
+            app.push_log(format!("✗ couldn't set up the network's wallet: {error:#}"));
+        }
         app.push_log(format!(
             "env vars for your shell: source {}",
             state::env_sh_path(&app.state_dir).display()
@@ -250,10 +284,31 @@ impl App {
         app
     }
 
+    /// Writes this network's state. On a remote network, the shared settings (the checkouts, the
+    /// wallet password) also go to the root state, where every network reads them.
     fn save(&mut self) {
-        if let Err(error) = self.saved.save(&self.state_dir, &self.lez, &self.programs) {
+        let mut result = self.saved.save(&self.state_dir, &self.lez, &self.programs);
+        if result.is_ok() && !self.network.is_local() {
+            let mut root = Saved::load(&self.root_state_dir);
+            root.share_settings_from(&self.saved);
+            let local = Lez::new(self.lez.dir.clone());
+            result = root.save(&self.root_state_dir, &local, &self.programs);
+        }
+        if let Err(error) = result {
             self.push_log(format!("✗ couldn't save state: {error:#}"));
         }
+    }
+
+    /// Refuses `what` on a remote network, whose sequencer isn't prog-tui's to run.
+    fn local_only(&mut self, what: &str) -> bool {
+        if self.network.is_local() {
+            return true;
+        }
+        self.push_log(format!(
+            "✗ {what}: only on the local chain. {} is someone else's sequencer (N switches network)",
+            self.network.label()
+        ));
+        false
     }
 
     pub fn push_log(&mut self, line: String) {
@@ -341,7 +396,8 @@ impl App {
             self.refreshing.status = true;
             self.last_status = Some(Instant::now());
             self.guests = self.programs.guests();
-            let (lez, programs, state_dir, rpc, tx) = (
+            let (network, lez, programs, state_dir, rpc, tx) = (
+                self.network.clone(),
                 self.lez.clone(),
                 self.programs.clone(),
                 self.state_dir.clone(),
@@ -349,7 +405,7 @@ impl App {
                 self.tx.clone(),
             );
             self.rt.spawn(async move {
-                let status = jobs::gather_status(lez, programs, state_dir, rpc).await;
+                let status = jobs::gather_status(network, lez, programs, state_dir, rpc).await;
                 let _ = tx.send(Msg::Status(status));
             });
         }
@@ -591,6 +647,7 @@ impl App {
         }
         let ctx = Ctx::new(
             self.tx.clone(),
+            self.network.clone(),
             self.lez.clone(),
             self.programs.clone(),
             self.state_dir.clone(),
@@ -611,6 +668,9 @@ impl App {
 
     /// How to stop whatever sequencer is running now, if any.
     fn running_sequencer(&self) -> Option<StopTarget> {
+        if !self.network.is_local() {
+            return None;
+        }
         let seq = &self.status.seq;
         if let Some(pgid) = seq.managed {
             return Some(StopTarget::Managed(pgid));
@@ -749,6 +809,15 @@ impl App {
         }
         match key.code {
             KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('N') => {
+                if let Some((busy, _)) = &self.busy {
+                    let busy = busy.clone();
+                    self.push_log(format!("busy: wait for `{busy}` to finish before switching network"));
+                } else {
+                    self.switch_network = true;
+                    self.quit = true;
+                }
+            }
             KeyCode::Char('?') => self.modal = Modal::Help,
             KeyCode::Tab | KeyCode::Right => self.cycle_focus(true),
             KeyCode::BackTab | KeyCode::Left => self.cycle_focus(false),
@@ -763,8 +832,20 @@ impl App {
                 self.clamp_selection();
             }
             KeyCode::Char('e') => {
-                for line in sequencer::sequencer_help(&self.state_dir, &self.rpc.url, &self.status.seq) {
-                    self.push_log(line);
+                if self.network.is_local() {
+                    for line in sequencer::sequencer_help(&self.state_dir, &self.rpc.url, &self.status.seq) {
+                        self.push_log(line);
+                    }
+                } else {
+                    self.push_log(format!(
+                        "{}: someone else's sequencer, at {}; its log is theirs",
+                        self.network.label(),
+                        self.rpc.url
+                    ));
+                    self.push_log(format!(
+                        "  use its wallet: source {}",
+                        state::env_sh_path(&self.state_dir).display()
+                    ));
                 }
             }
             KeyCode::Char('L') => {
@@ -783,7 +864,12 @@ impl App {
                     FormAction::Dirs,
                 ));
             }
-            KeyCode::Char('s') => self.toggle_sequencer(),
+            KeyCode::Char('s') => {
+                if self.local_only("starting or stopping the sequencer") {
+                    self.toggle_sequencer();
+                }
+            }
+            KeyCode::Char('R') if !self.local_only("resetting the chain") => {}
             KeyCode::Char('R') => {
                 let stop = self.running_sequencer();
                 self.modal = Modal::Confirm(
@@ -796,13 +882,18 @@ impl App {
             }
             KeyCode::Char('W') => {
                 let stop = self.running_sequencer();
-                self.modal = Modal::Confirm(
+                let text = if self.network.is_local() {
                     format!(
                         "Run the walkthrough? It builds, then resets the chain and wallet.{} y/n",
                         stop_note(stop)
-                    ),
-                    Confirmed::Walkthrough(stop),
-                );
+                    )
+                } else {
+                    format!(
+                        "Run the walkthrough on {}? It builds, checks the sequencer, then deploys token and creates a token there, paid by a test account. Nothing is reset. y/n",
+                        self.network.label()
+                    )
+                };
+                self.modal = Modal::Confirm(text, Confirmed::Walkthrough(stop));
             }
             KeyCode::Char('b') => self.spawn_job("build", |mut ctx| async move {
                 jobs::build(&mut ctx).await
@@ -1231,9 +1322,14 @@ impl App {
             FormAction::Dirs => {
                 self.saved.lez_dir.clone_from(&values[0]);
                 self.saved.programs_dir.clone_from(&values[1]);
-                self.lez = Lez::new(state::resolve_dir(&self.crate_dir, &values[0]));
+                let (lez, rpc, wallet_error) =
+                    connect(&self.network, &self.crate_dir, &values[0], &self.state_dir);
+                self.lez = lez;
+                self.rpc = rpc;
+                if let Some(error) = wallet_error {
+                    self.push_log(format!("✗ couldn't set up the network's wallet: {error:#}"));
+                }
                 self.programs = Programs::new(state::resolve_dir(&self.crate_dir, &values[1]));
-                self.rpc = Rpc::new(self.lez.sequencer_url());
                 self.accounts.clear();
                 self.views.clear();
                 self.guests = self.programs.guests();
@@ -1498,6 +1594,30 @@ fn call_request(
             .collect(),
         ..CallRequest::default()
     })
+}
+
+/// The LEZ checkout and the RPC for `network`. A remote network gets its own wallet home,
+/// `<state_dir>/wallet`, made from LEZ's debug `wallet_config.json` with `sequencer_addr` set to
+/// the network's sequencer; its RPC is that sequencer. The error is the wallet home's, if setting it
+/// up failed (no LEZ checkout yet, say).
+fn connect(
+    network: &Network,
+    crate_dir: &std::path::Path,
+    lez_dir: &str,
+    state_dir: &std::path::Path,
+) -> (Lez, Rpc, Option<anyhow::Error>) {
+    let lez = Lez::new(state::resolve_dir(crate_dir, lez_dir));
+    match network {
+        Network::Local => {
+            let rpc = Rpc::new(lez.sequencer_url());
+            (lez, rpc, None)
+        }
+        Network::Remote { url, .. } => {
+            let home = state_dir.join("wallet");
+            let error = lez.prepare_wallet_home(&home, url).err();
+            (lez.with_wallet_home(home), Rpc::new(url.clone()), error)
+        }
+    }
 }
 
 fn stop_note(stop: Option<StopTarget>) -> String {

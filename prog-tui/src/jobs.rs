@@ -23,6 +23,7 @@ use crate::{
     guest_bin,
     lez::{Lez, RepoInfo, repo_info},
     lez_call::Seed,
+    network::Network,
     programs::{Guest, Programs, ProgramsInfo, programs_info, relative, state_type},
     rpc::{AccountView, Rpc, describe_bytes, unhex},
     sequencer::{self, SeqStatus, StopTarget},
@@ -81,6 +82,7 @@ pub enum Msg {
 /// What a job gets: the checkouts, the RPC, a channel to the UI, and its own log file.
 pub struct Ctx {
     tx: UnboundedSender<Msg>,
+    pub network: Network,
     pub lez: Lez,
     pub programs: Programs,
     pub state_dir: PathBuf,
@@ -98,8 +100,13 @@ pub struct CmdOut {
 }
 
 impl Ctx {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "everything a job needs, passed once by spawn_job"
+    )]
     pub fn new(
         tx: UnboundedSender<Msg>,
+        network: Network,
         lez: Lez,
         programs: Programs,
         state_dir: PathBuf,
@@ -119,6 +126,7 @@ impl Ctx {
         let log_path = logs.join(format!("{stamp}-{slug}.log"));
         Self {
             tx,
+            network,
             lez,
             programs,
             state_dir,
@@ -267,14 +275,23 @@ async fn forward_lines(pipe: impl AsyncRead + Unpin, tx: UnboundedSender<String>
 
 // ---- Read-only refreshes ----
 
-pub async fn gather_status(lez: Lez, programs: Programs, state_dir: PathBuf, rpc: Rpc) -> Status {
+/// The checkouts, and the sequencer: reachable, healthy, its block and channel. For a remote
+/// network there's no process of ours to find, so only the RPC is asked.
+pub async fn gather_status(
+    network: Network,
+    lez: Lez,
+    programs: Programs,
+    state_dir: PathBuf,
+    rpc: Rpc,
+) -> Status {
     let url = rpc.url.clone();
     let blocking = tokio::task::spawn_blocking(move || {
         let port_open = sequencer::port_open(&url);
+        let local = network.is_local();
         let seq = SeqStatus {
             port_open,
-            managed: sequencer::managed_pgid(&state_dir),
-            listener: port_open.then(|| sequencer::listener_pid(&url)).flatten(),
+            managed: local.then(|| sequencer::managed_pgid(&state_dir)).flatten(),
+            listener: (local && port_open).then(|| sequencer::listener_pid(&url)).flatten(),
             ..SeqStatus::default()
         };
         (repo_info(&lez), programs_info(&programs), seq)
@@ -284,6 +301,7 @@ pub async fn gather_status(lez: Lez, programs: Programs, state_dir: PathBuf, rpc
     if seq.port_open && rpc.healthy().await {
         seq.healthy = true;
         seq.block = rpc.last_block().await;
+        seq.channel_id = rpc.channel_id().await;
     }
     Status { repo, programs, seq }
 }
@@ -570,6 +588,9 @@ pub async fn build_and_deploy(ctx: &mut Ctx, file: &Path, payer: &str) -> anyhow
 
 /// Starts the sequencer and waits until it answers `checkHealth`.
 pub async fn start_sequencer(ctx: &mut Ctx) -> anyhow::Result<()> {
+    if !ctx.network.is_local() {
+        bail!("prog-tui runs only the local sequencer; {} is someone else's", ctx.network.label());
+    }
     if ctx.rpc.healthy().await {
         ctx.log("a sequencer is already running and healthy");
         return Ok(());
@@ -630,6 +651,9 @@ pub async fn stop_sequencer(ctx: &mut Ctx, target: StopTarget) -> anyhow::Result
 
 /// Stop (if given), `just clean`, start: a fresh chain and an empty wallet.
 pub async fn reset(ctx: &mut Ctx, stop: Option<StopTarget>) -> anyhow::Result<()> {
+    if !ctx.network.is_local() {
+        bail!("a remote network can't be reset from here");
+    }
     if let Some(target) = stop {
         stop_sequencer(ctx, target).await?;
     }
@@ -647,14 +671,51 @@ pub async fn reset(ctx: &mut Ctx, stop: Option<StopTarget>) -> anyhow::Result<()
 }
 
 /// `wallet check-health` (creates the wallet on first run), then imports the two test accounts.
+/// The genesis-funded test accounts' keys, as `just wallet-import-test-accounts` imports them. The
+/// local chain and LEZ's docker devnet both fund them at genesis. Public test keys: never use them
+/// on a chain that matters.
+const TEST_ACCOUNT_KEYS: [&str; 2] = [
+    "7f273098f25b71e6c005a9519f2678da8d1c7f01f6a27778e2d9948abdf901fb",
+    "f434f8741720014586ae43356d2aec6257da086222f604ddb75d69733b86fc4c",
+];
+
+/// `wallet check-health` (creates the wallet on first run), then imports the two test accounts.
+/// Run through the wallet itself rather than `just wallet-import-test-accounts`, which always uses
+/// LEZ's debug wallet home: a remote network has its own. Importing a key the wallet already holds
+/// changes nothing, so this is safe to repeat.
 pub async fn wallet_init(ctx: &mut Ctx) -> anyhow::Result<()> {
     // The wallet reads the new storage's password from `LEE_WALLET_PASSWORD`, set by `command`.
     let command = ctx.wallet(&["check-health"]);
     ctx.run_ok("wallet check-health", command).await?;
-    let mut command = ctx.command("just");
-    command.arg("wallet-import-test-accounts");
-    ctx.run_ok("just wallet-import-test-accounts", command)
-        .await?;
+    for key in TEST_ACCOUNT_KEYS {
+        let command = ctx.wallet(&["account", "import", "public", "--private-key", key]);
+        ctx.run_ok("wallet account import public --private-key <test key>", command)
+            .await?;
+    }
+    Ok(())
+}
+
+/// For a remote network: its sequencer answers, and reports the channel `networks.json` gives.
+pub async fn check_network(ctx: &mut Ctx) -> anyhow::Result<()> {
+    let Network::Remote { url, channel_id, .. } = ctx.network.clone() else {
+        return Ok(());
+    };
+    if !ctx.rpc.healthy().await {
+        bail!("no healthy sequencer at {url}");
+    }
+    let reported = ctx.rpc.channel_id().await;
+    match (&channel_id, &reported) {
+        (Some(expected), Some(reported)) if expected != reported => bail!(
+            "{url} posts to channel {reported}, not the {expected} networks.json gives: another network?"
+        ),
+        (Some(_), None) => bail!("{url} didn't report its channel (getChannelId)"),
+        _ => {}
+    }
+    ctx.log(format!(
+        "✓ {url}: healthy, block {}, channel {}",
+        ctx.rpc.last_block().await.map_or_else(|| "?".to_owned(), |b| b.to_string()),
+        reported.as_deref().unwrap_or("?")
+    ));
     Ok(())
 }
 
@@ -1367,14 +1428,22 @@ pub fn short(id: &str) -> String {
 
 // ---- The walkthrough ----
 
-pub const WALKTHROUGH: [&str; 6] = [
-    "Build wallet, lez-programs, jz guests, tools",
-    "Reset the chain, start the sequencer",
-    "Initialise wallet, import test accounts",
-    "Set PAYER, create ACCOUNT",
-    "Deploy token",
-    "Create a token: 1000 to ACCOUNT, check it",
-];
+/// The walkthrough's steps. On a remote network the second step checks the network instead of
+/// resetting a chain, which isn't prog-tui's to reset.
+pub fn walkthrough_steps(network: &Network) -> [&'static str; 6] {
+    [
+        "Build wallet, lez-programs, jz guests, tools",
+        if network.is_local() {
+            "Reset the chain, start the sequencer"
+        } else {
+            "Check the sequencer and its channel"
+        },
+        "Initialise wallet, import test accounts",
+        "Set PAYER, create ACCOUNT",
+        "Deploy token",
+        "Create a token: 1000 to ACCOUNT, check it",
+    ]
+}
 
 /// The walkthrough's token supply, all minted to `ACCOUNT`.
 const WALKTHROUGH_SUPPLY: u128 = 1000;
@@ -1398,15 +1467,23 @@ macro_rules! step {
 /// WALKTHROUGH.md, from a clean chain: lez-programs' token program, deployed and called with spel.
 pub async fn walkthrough(ctx: &mut Ctx, stop: Option<StopTarget>) -> anyhow::Result<()> {
     ctx.send(Msg::Checklist(
-        WALKTHROUGH.iter().map(|step| (*step).to_owned()).collect(),
+        walkthrough_steps(&ctx.network).iter().map(|step| (*step).to_owned()).collect(),
     ));
+    // A remote wallet keeps its accounts between runs, so a second run would trip over labels the
+    // first one made: there, new accounts get none.
+    let label = |label: &'static str| if ctx.network.is_local() { label } else { "" };
+    let (account_label, token_label) = (label("account"), label("jz-token"));
     step!(ctx, 0, build(ctx).await);
-    step!(ctx, 1, reset(ctx, stop).await);
+    if ctx.network.is_local() {
+        step!(ctx, 1, reset(ctx, stop).await);
+    } else {
+        step!(ctx, 1, check_network(ctx).await);
+    }
     step!(ctx, 2, wallet_init(ctx).await);
     let (payer, account) = step!(ctx, 3, async {
         let payer = choose_payer(ctx).await?;
         ctx.send(Msg::SetPayer(payer.clone()));
-        let account = new_account(ctx, "account").await?;
+        let account = new_account(ctx, account_label).await?;
         ctx.send(Msg::SetAccount(account.clone()));
         ctx.log(format!("PAYER={payer} ACCOUNT={account}"));
         anyhow::Ok((payer, account))
@@ -1425,7 +1502,7 @@ pub async fn walkthrough(ctx: &mut Ctx, stop: Option<StopTarget>) -> anyhow::Res
     step!(ctx, 5, async {
         // A token's definition lives on an account of its own, which signs for it; the initial
         // supply goes to ACCOUNT's holding, which signs too.
-        let definition = new_account(ctx, "jz-token").await?;
+        let definition = new_account(ctx, token_label).await?;
         let idl = ctx.programs.idl("token");
         let call = SpelCall {
             name: deployment.name.clone(),

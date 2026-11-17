@@ -10,8 +10,40 @@ It runs the steps of [WALKTHROUGH.md](../example_progs/WALKTHROUGH.md) for you, 
 
 ```bash
 cd jz-progs/prog-tui
-cargo run --release
+cargo run --release              # opens on the network selector
+cargo run --release -- local     # or skip it: a network's key, as the selector's choices have them
 ```
+
+**It opens on a network selector** (Enter or 1–9 to choose, `q` to quit), starting on the network used last:
+- **Local standalone:** LEZ's standalone sequencer on `127.0.0.1:3040`, which prog-tui starts, stops and resets, with LEZ's debug wallet. Everything below applies.
+- **A network from [`networks.json`](networks.json)**, one choice per sequencer listed there (a devnet, say). prog-tui only talks to that sequencer's RPC.
+
+`networks.json` names each network, its sequencers' addresses, and optionally its channel id:
+
+```json
+{
+  "networks": [
+    {
+      "name": "local-devnet",
+      "channel_id": "0101010101010101010101010101010101010101010101010101010101010101",
+      "sequencers": ["127.0.0.1:3040", "10.0.0.7", "http://seq.example:3041"]
+    }
+  ]
+}
+```
+
+- **Addresses:** an IP or host, with an optional port (default 3040, the sequencer's RPC port) and an optional `http://` or `https://`.
+- **The channel id isn't needed** to use the network: the wallet only talks to the sequencer's RPC. When it's given, prog-tui compares it with the sequencer's `getChannelId`, and the status bar shows `channel ✓`, or the channel it found in red. A wrong address shows up at once, rather than as accounts that aren't there.
+- **The file as checked in** lists LEZ's four-sequencer docker devnet (`docker-compose.yml` in LEZ publishes their RPCs on ports 3040–3043, on channel `0101…`). Edit it for your devnet's addresses. LEZ's local standalone sequencer also listens on 3040, so with it running, the first devnet entry reaches it.
+
+**On a remote network:**
+- **Its own wallet and state:** a wallet home at `.state/networks/<key>/wallet`, made from LEZ's debug `wallet_config.json` with `sequencer_addr` set to the chosen sequencer (later edits to that file are kept), and its own `PAYER`, `ACCOUNT`, deployments, `env.sh` and job logs in `.state/networks/<key>/`. The checkouts and the wallet password are shared.
+- **No sequencer control:** `s` (start/stop) and `R` (reset) are refused, and `e` points at the network's `env.sh` instead.
+- **`i`** imports the two test accounts into the network's wallet. LEZ's docker devnet funds them at genesis, as the local chain does; another devnet may not.
+- **`W`** builds, checks the sequencer is healthy and on the configured channel, then runs the rest of the walkthrough there. Nothing is reset, and the accounts it creates get no labels, so it can run again.
+- **Revert reasons** are in that sequencer's own log, which prog-tui can't read.
+
+**`N`** goes back to the selector, between jobs.
 
 It uses three checkouts next to `jz-progs`. Press `L` to point it at others; the paths are saved.
 
@@ -43,7 +75,7 @@ Keep LEZ at the tag lez-programs pins (`v0.4.0-rc3` today), and spel on its `ref
 - **Status bar:**
   - **LEZ:** the checkout's branch, commit and whether it's dirty.
   - **PROGS:** the same for lez-programs, then whether `spel`, `lez-call` and `lez-dryrun` are built.
-  - **SEQ:** the sequencer (stopped, starting, or running; started by prog-tui or not; block height), and `PAYER` / `ACCOUNT`.
+  - **SEQ:** the local sequencer (stopped, starting, or running; started by prog-tui or not; block height), and `PAYER` / `ACCOUNT`. On a remote network, **NET** instead: the network's name, whether its sequencer is reachable, its block height and URL, and `channel ✓` when its channel matches `networks.json`.
 - **Accounts:** the wallet's accounts. ★ marks `PAYER`, ▶ marks `ACCOUNT`, and each shows its balance, or `off-chain` when it doesn't exist on chain yet. Deploys create a header and some segment accounts in the wallet; `h` shows or hides them.
 - **Account:** the selected account's nonce, balance, and every program's actor state on it. Each state is labelled by program name when prog-tui deployed that program, and shown as text when it's printable. For a program with a spel IDL (lez-programs' programs and your guests), the selected account's state is decoded with `spel inspect` and shown as JSON, marked `(spel)`: between jobs, and again only when the state's bytes change. A state spel can't decode stays as text or hex.
 - **Programs:** three lists.
@@ -57,8 +89,8 @@ Keep LEZ at the tag lez-programs pins (`v0.4.0-rc3` today), and spel on its `ref
 | Key | Does |
 |---|---|
 | `W` | Walkthrough. Asks first, because it resets the chain and the wallet |
-| `s` | Start the sequencer, or stop it. Asks first when prog-tui didn't start it |
-| `R` | Reset: stop, `just clean`, start. Wipes the chain and the wallet |
+| `s` | Start the sequencer, or stop it. Asks first when prog-tui didn't start it. Local only |
+| `R` | Reset: stop, `just clean`, start. Wipes the chain and the wallet. Local only |
 | `b` | Build: LEZ's wallet; lez-programs' programs and their IDLs (`make idl`); your guests; `spel`, `lez-call` and `lez-dryrun` in their checkouts; then your guests' IDLs (`spel generate-idl`) |
 | `i` | Initialise the wallet and import the two funded test accounts |
 | `n` | New public account, with an optional label |
@@ -72,6 +104,7 @@ Keep LEZ at the tag lez-programs pins (`v0.4.0-rc3` today), and spel on its `ref
 | `x` | Forget the selected deployment |
 | `e` | Print shell commands for the sequencer (watch its log, use it, stop it) and the `source` line for `env.sh` |
 | `L` | Change the LEZ and lez-programs checkouts |
+| `N` | Back to the network selector |
 | `Tab`, `↑↓`/`jk` | Switch pane, select |
 | `?` / `q` | Help / quit |
 

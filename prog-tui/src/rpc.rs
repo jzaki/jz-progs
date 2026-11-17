@@ -138,6 +138,11 @@ impl Rpc {
         ))
     }
 
+    /// The Bedrock channel the sequencer posts to, as hex (`getChannelId`).
+    pub async fn channel_id(&self) -> Option<String> {
+        Some(self.call("getChannelId", json!([])).await.ok()?.as_str()?.to_ascii_lowercase())
+    }
+
     pub async fn last_block(&self) -> Option<u64> {
         self.call("getLastBlockId", json!([])).await.ok()?.as_u64()
     }

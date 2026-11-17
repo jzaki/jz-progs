@@ -14,20 +14,63 @@ pub const DEFAULT_SEQUENCER_URL: &str = "http://127.0.0.1:3040";
 #[derive(Clone, Debug)]
 pub struct Lez {
     pub dir: PathBuf,
+    /// A wallet home of prog-tui's own, for a remote network; `None` is LEZ's debug home.
+    wallet_home: Option<PathBuf>,
 }
 
 impl Lez {
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
+        Self {
+            dir,
+            wallet_home: None,
+        }
+    }
+
+    /// The same checkout, with its wallet at `home` instead of LEZ's debug home. A remote network
+    /// keeps its own wallet, so its accounts and nonces never mix with the local chain's.
+    pub fn with_wallet_home(mut self, home: PathBuf) -> Self {
+        self.wallet_home = Some(home);
+        self
     }
 
     pub fn present(&self) -> bool {
         self.dir.join("Justfile").is_file() && self.dir.join("lez/wallet").is_dir()
     }
 
-    /// `just run-wallet`'s home; `lez-call` and `spel` read the same wallet.
+    /// The wallet every command uses (`LEE_WALLET_HOME_DIR`): `just run-wallet`'s debug home for
+    /// the local chain, or the network's own. `lez-call` and `spel` read the same wallet.
     pub fn wallet_home(&self) -> PathBuf {
+        self.wallet_home
+            .clone()
+            .unwrap_or_else(|| self.debug_wallet_home())
+    }
+
+    /// LEZ's debug wallet home, `lez/wallet/configs/debug`: the local chain's, and the template
+    /// for a remote network's `wallet_config.json`.
+    pub fn debug_wallet_home(&self) -> PathBuf {
         self.dir.join("lez/wallet/configs/debug")
+    }
+
+    /// Makes `home` a wallet home for the sequencer at `url`: LEZ's debug `wallet_config.json`
+    /// with `sequencer_addr` set to `url`. Keeps the rest of an existing config, so a hand edit
+    /// (a shorter `seq_poll_timeout`, say) survives. Never touches `storage.json`.
+    pub fn prepare_wallet_home(&self, home: &Path, url: &str) -> anyhow::Result<()> {
+        fs::create_dir_all(home)?;
+        let path = home.join("wallet_config.json");
+        let template = if path.is_file() {
+            path.clone()
+        } else {
+            self.debug_wallet_home().join("wallet_config.json")
+        };
+        let text = fs::read_to_string(&template)
+            .map_err(|error| anyhow::anyhow!("reading {}: {error}", template.display()))?;
+        let mut config: serde_json::Value = serde_json::from_str(&text)?;
+        config["sequencer"]["sequencer_addr"] = serde_json::Value::String(url.to_owned());
+        let updated = serde_json::to_string_pretty(&config)?;
+        if fs::read_to_string(&path).ok().as_deref() != Some(updated.as_str()) {
+            fs::write(&path, updated)?;
+        }
+        Ok(())
     }
 
     pub fn storage_json(&self) -> PathBuf {
