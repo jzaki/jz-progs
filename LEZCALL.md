@@ -9,7 +9,7 @@ prog-tui uses all three to list a program's messages, plan calls, send them, and
 
 These replace `prog_cli`, whose subcommands (`hello`, `move-write`, `tail`, `pda`, …) each hard-coded one example program. They also replace `lezcall`, which did all of this inside LEZ's `examples/program_deployment` and so pulled in the wallet crate, the engine and risc0.
 
-Status: built, on LEZ `dev` (checked at `680eb56b3`). Public accounts only.
+Status: built, on LEZ `dev` (checked at `680eb56b3`). Public accounts only. `wallet program call` came with PR #989, after LEZ v0.4.0-rc3: at that tag (the one lez-programs pins) `lez-call` and `lez-dryrun` still read and plan calls, but nothing sends them. lez-programs' own programs don't go through these pieces at all (§5).
 
 ## 1. What a public call needs
 
@@ -209,17 +209,18 @@ For the native token, `lez-dryrun` also prints the real `wallet auth-transfer se
 
 ## 5. The examples, as they are
 
-No example program needed a change to be called. Each row was called on a local sequencer, and the chain matched the dry run.
+**These rows are a record:** the guests as they were on 2026-11-11, each called on a local sequencer on LEZ `dev` at `680eb56b3`, where the chain matched the dry run. No example program needed a change to be called.
+
+**Since 2026-11-17 prog-tui calls `example_progs` with spel**, which works at v0.4.0-rc3. For that, the guests changed:
+- every message is an `enum Message` with named fields, and text is a `String` (`jz_hello_world` takes `Hello { greeting }`, `jz_admin_seat` `Open { config }`, `jz_simple_token` `Credit { amount }`);
+- `jz_admin_seat` and `jz_simple_token` grant their PDA's seed (below), so a fresh PDA needs no evidence;
+- `jz_clock_gate` reads the clock (`ReadTimestamp`, and the clock's reply) instead of asserting a time it's given, since LEZ removed `AssertTimestamp` (`503115c2d`, 2026-11-10). Its entrypoint is `raw`, so `lez-call iface` sees only raw bytes; spel's IDL has its `Set`.
+
+`lez-call` and `lez-dryrun` still read and plan them, except `jz_clock_gate`. [prog-tui/README.md](prog-tui/README.md), "Calling with spel", has what each call takes now. LEZ's own tutorial guests (`examples/program_deployment/`) were called the same way there, with nothing to give beyond `--to` (and a callee or a `pda:` seed for the two tail-call ones). prog-tui no longer builds them: it builds `example_progs` and lez-programs' programs.
 
 | Program · message | Caller gives | Dry run finds |
 |---|---|---|
-| `hello_world`, `jz_hello_world` · `Vec<u8>` | `--to` | nothing more |
-| `hello_world_with_authorization` | `--to` | root signs (hint; without it, found from the panic) |
-| `hello_world_with_move_function` · `Write` | `--to` | nothing more |
-| ″ · `MoveData { data, to }` | `--to` (the source), `data` = its current state | declare `to@program` (undeclared). A wrong `data` stops with the guest's message |
-| ″ · `Append` | | hint *internal*. A direct call panics on `from_own_program` |
-| `simple_tail_call` · `Actor` | `--to`, the callee actor | declare the callee (undeclared) |
-| `tail_call_with_pda` · `AccountId` | `--to pda:PDA_SEED`, the callee program | root `Pda{caller, [37;32]}` evidence (seed constant). Declare `(pda, callee)`. The callee is authorized by the seed grant |
+| `jz_hello_world` · `Vec<u8>` | `--to` | nothing more |
 | `jz_hello_account` · `Hello`, `WriteAccountId` | `--to` | nothing more |
 | `jz_admin_seat` · `Open(Vec<u8>)` | `--to` your account | you sign. Declare your PDA. Its first time: `Pda{program, your id}` (seed = the root's id) |
 | ″ · `Init` | | hint *internal*. A direct call panics "Init comes from a seat" |
@@ -230,25 +231,29 @@ No example program needed a change to be called. Each row was called on a local 
 | `jz_clock_gate` · `Set { now }`, `SetExact { now }` | `--to`, `now` in Unix ms | declare the clock, `CLOCK_01` under the clock program (undeclared: the dry run adds it). `Set`: `now` no later than the clock, and from the stored next set. `SetExact`: `now` is `CLOCK_01`'s timestamp, and the call must land in the next block |
 | native token · `Transfer` | `--to` the sender, `--message-hex` (it has no guest source) | declare the recipient for `Credit`; prints `wallet auth-transfer send` too |
 
-**One optional program change** (not made): `jz_admin_seat` and `jz_simple_token` could grant the PDA seed when the seat messages its PDA.
-- **The change:** `Response::keep_state().send(SyncMessage::new(pda, &Init(…)).with_pda_seeds([PdaSeed::new(*admin.value())]))`. `Init`'s check could then become `input.is_authorized && input.from_own_program()`.
-- **What it buys:** the engine admits the PDA through the grant, with no evidence, and marks it `is_authorized`. The transaction would only need to declare the PDA: no seed search, and nothing different the first time.
-- **Where:** an edit to `jz-progs/example_progs/{admin_seat,simple_token}.rs`, which prog-tui copies to the `jz_*` guests.
-- **The catch:** it changes the examples' semantics a little (the PDA becomes authorized), so it's your call.
+**lez-programs' programs aren't in this table.** Their guests decode the message themselves (`actor_entrypoint!(raw token_program::handle_message)`), so `lez-call iface` sees only raw bytes: the message types are in another crate (`token_core::Message`), and `lez-call` reads one guest file. lez-programs publishes spel IDLs for them instead (`artifacts/<program>-idl.json`, from `make idl`). prog-tui calls them with `spel send` from `refactor/lez-v0.4.x`, which links LEZ's wallet library and so works at v0.4.0-rc3. The caller gives the root, the signers, and any actor spel can't see from the message's fields.
+
+**One program change** (made on 2026-11-17): `jz_admin_seat` and `jz_simple_token` grant the PDA seed when the seat messages its PDA.
+- **The change:** `Response::keep_state().send(SyncMessage::new(pda, &Init { .. }).with_pda_seeds([PdaSeed::new(*admin.value())]))`. `Init` keeps its stronger check (from this program, and from the seat whose PDA this is).
+- **What it buys:** the engine admits the PDA through the grant, with no evidence, and marks it `is_authorized` for that message. The transaction only declares the PDA: no seed search, and nothing different the first time. That's what lets spel, which can't give PDA evidence, call them.
+- **Where:** `jz-progs/example_progs/{admin_seat,simple_token}.rs`.
 
 ## 6. prog-tui on these
 
-- **`v`** shows `lez-call iface` for the guest's source. A deployment's source is its guest's, by name. When prog-tui doesn't know the guest, `lez-dryrun source-of` finds it by image id.
+These are prog-tui's calls to a guest with no spel IDL: one whose message isn't an `enum Message`, or a deployment it doesn't know. Every guest in `example_progs` has an IDL now, so prog-tui calls them, like lez-programs' programs, with spel: [prog-tui/README.md](prog-tui/README.md), "Calling with spel".
+
+- **`v`** shows `lez-call iface` for the guest's source. A deployment's source is its guest's, by name. When prog-tui doesn't know the deployment, `lez-dryrun source-of` finds the jz guest by image id.
 - **`c`** lists `lez-call --json iface`'s messages, with their hints and doc comments.
   - **The form:** `to` (prefilled with `ACCOUNT`; its hint lists `pda:<CONST>` for each seed constant), one field per param, then `sign` (`auto`, `y`, `n`), `actors` and `pda seeds`.
   - **Enter:** encodes with `lez-call` and plans with `lez-dryrun`, as a job. A pane shows the plan, or the guest's panic, and the `wallet program call` line.
   - **Enter again:** runs that line through the wallet, then checks each state the plan changes against the chain. The log shows a `✓`/`✗` per state, and the revert reason from the sequencer's log when there is one.
 - **Without `lez-dryrun`:** the pane shows the encoded message and a `wallet program call` with just `to`. `to` signs when asked, or when the source hints it. That call is sent unchecked.
+- **Without `wallet program call`** (LEZ v0.4.0-rc3): the plan shows, and the pane says it can't be sent with this wallet.
 - **PDAs** the call declares are watched in the Accounts pane, as `PDA of <program>`.
 - **Deploying** (`d`, `u`, the walkthrough) is the wallet's alone:
   1. a fresh header account, and one fresh segment account per 96 KiB of the guest's user ELF (read from the `.bin` header);
   2. then `wallet program-loader deploy`, paid by `PAYER`.
-- **`b`** builds the wallet, the runners and the guests in LEZ, then `lez-call` and `lez-dryrun` in their own checkouts.
+- **`b`** builds the wallet in LEZ, lez-programs' programs and the jz guests in lez-programs, then `spel`, `lez-call` and `lez-dryrun` in their own checkouts.
 
 ## 7. Where it lives
 
@@ -257,7 +262,7 @@ No example program needed a change to be called. Each row was called on a local 
 | `lez-call` | its own repo, [jzaki/lez-prog-call](https://github.com/jzaki/lez-prog-call) | `syn`, `quote`, `serde`, `serde_json`, `bs58`, `anyhow` (14 crates in all) |
 | `lez-dryrun` | `jz-progs/lez-dryrun`, its own Cargo workspace | LEZ's `lee`, `lee_core`, `program_loader_core` and `sequencer_service_rpc`, by path, plus risc0 (LEZ's `Cargo.lock` and toolchain, copied) |
 | `wallet program call` | LEZ, `lez/wallet/src/cli/programs/program.rs` | the wallet |
-| prog-tui | `jz-progs/prog-tui` | no LEZ crate; runs `wallet`, `lez-call` and `lez-dryrun` |
+| prog-tui | `jz-progs/prog-tui` | no LEZ crate; runs `wallet`, `lez-call`, `lez-dryrun` and `spel` |
 
 **`lez-dryrun` files:**
 
@@ -269,13 +274,11 @@ No example program needed a change to be called. Each row was called on a local 
 | `plan.rs` | The fixpoint (§3.2), the plan, and its text |
 | `guests.rs` | The image-id lookup for `source-of` |
 
-**Leftovers on the branch:**
-- `prog_cli` is deleted.
-- `deploy_program` (`examples/program_deployment/src/lib.rs`) still prints its `Deployed Program with {"program_id":…}` line, which prog-tui reads from the stock runners' output.
+**Leftovers on the branch:** `prog_cli` is deleted. `deploy_program` (`examples/program_deployment/src/lib.rs`) still prints its `Deployed Program with {"program_id":…}` line; nothing in jz-progs reads it now that prog-tui doesn't run the stock runners.
 
 ## 8. Open questions
 
 1. `wallet program call` needs proposing upstream.
-2. Should the seed-grant change to `jz_admin_seat` and `jz_simple_token` go in (§5)?
+2. ~~Should the seed-grant change to `jz_admin_seat` and `jz_simple_token` go in (§5)?~~ Made on 2026-11-17, so spel can call them.
 3. Private accounts: once LEZ PR #985 lands, the dry run can take private witnesses, and `wallet program call` can take private actors. That's also when `--leave-pending` becomes useful.
 4. How this relates to SPEL v0.4: `lez-call`'s IDL ([idl.md](https://github.com/jzaki/lez-prog-call/blob/main/idl.md), which maps SPEL's IDL onto it) is the v0.4 IDL. A SPEL v0.4 could emit the same format. Which actor a call targets is still the caller's, with the dry run finding the rest ([SPEL.md](SPEL.md) §7 open question 2).

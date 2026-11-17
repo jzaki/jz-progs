@@ -1,0 +1,22 @@
+# Written by jz-progs/prog-tui (templates/jz/). Each src/bin/jz_<name>.rs is a link to
+# jz-progs/example_progs/<name>.rs and builds as the guest jz_<name>.
+[package]
+name = "jz-guest"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[profile.release]
+debug = 0
+strip = "symbols"
+
+[dependencies]
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3" }
+clock_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3" }
+borsh = { version = "1.5.7", features = ["derive"] }
+risc0-zkvm = { version = "=3.0.5", default-features = false }
+# The risc0 guest toolchain ships rustc 1.88; ruint 1.18+ needs 1.90. Same pin as lez-programs'
+# guests.
+ruint = { version = "=1.17.0", default-features = false }

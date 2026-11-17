@@ -1,0 +1,16 @@
+# Written by jz-progs/prog-tui (templates/jz/): it builds jz-progs/example_progs/*.rs, each
+# linked into guest/src/bin/ as jz_<name>.rs. prog-tui rewrites this file; edit the template.
+[package]
+name = "jz-methods"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Its own workspace, so lez-programs' root workspace doesn't claim it.
+[workspace]
+
+[build-dependencies]
+risc0-build = "=3.0.5"
+
+[package.metadata.risc0]
+methods = ["guest"]

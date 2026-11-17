@@ -375,15 +375,15 @@ mod tests {
     fn finds_revert_reasons() {
         let log = "[INFO  sequencer_core] Our turn\n\
                    \n\
-                   thread 'main' (1) panicked at examples/program_deployment/methods/guest/src/bin/hello_world_with_authorization.rs:17:5:\n\
+                   thread 'main' (1) panicked at programs/token/src/transfer.rs:17:5:\n\
                    Missing required authorization\n\
                    note: run with `RUST_BACKTRACE=1`\n\
                    [WARN  libp2p_kad::behaviour] Failed to trigger bootstrap\n\
-                   thread 'main' (1) panicked at examples/program_deployment/methods/guest/src/bin/hello_world_with_authorization.rs:17:5:\n\
+                   thread 'main' (1) panicked at programs/token/src/transfer.rs:17:5:\n\
                    Missing required authorization\n";
         let reasons = revert_reasons(log);
         assert_eq!(reasons.len(), 2);
-        assert!(reasons[0].contains("hello_world_with_authorization.rs:17:5"));
+        assert!(reasons[0].contains("transfer.rs:17:5"));
         assert_eq!(reasons[1], "  Missing required authorization");
     }
 }

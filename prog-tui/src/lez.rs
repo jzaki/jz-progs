@@ -1,4 +1,5 @@
-//! The LEZ checkout: where things are, and what state the repo is in.
+//! The LEZ checkout: the sequencer, the wallet and its home, and what state the repo is in. The
+//! programs prog-tui builds are in lez-programs ([`crate::programs`]).
 
 use std::{
     fs,
@@ -6,10 +7,7 @@ use std::{
     process::Command,
 };
 
-use crate::tools::{LEZ_CALL, LEZ_DRYRUN};
-
-/// Where `cargo build -p example_program_deployment_methods` puts the example guests.
-const GUEST_DIR: &str = "target/riscv-guest/example_program_deployment_methods/example_program_deployment_programs/riscv32im-risc0-zkvm-elf/release";
+use crate::tools::{LEZ_CALL, LEZ_DRYRUN, SPEL};
 
 pub const DEFAULT_SEQUENCER_URL: &str = "http://127.0.0.1:3040";
 
@@ -27,15 +25,7 @@ impl Lez {
         self.dir.join("Justfile").is_file() && self.dir.join("lez/wallet").is_dir()
     }
 
-    pub fn bin_dir(&self) -> PathBuf {
-        self.dir.join(GUEST_DIR)
-    }
-
-    pub fn guest_bin(&self, name: &str) -> PathBuf {
-        self.bin_dir().join(format!("{name}.bin"))
-    }
-
-    /// `just run-wallet`'s home; the runners and `lez-call` read the same wallet.
+    /// `just run-wallet`'s home; `lez-call` and `spel` read the same wallet.
     pub fn wallet_home(&self) -> PathBuf {
         self.dir.join("lez/wallet/configs/debug")
     }
@@ -50,28 +40,6 @@ impl Lez {
 
     pub fn release_bin(&self, name: &str) -> PathBuf {
         self.dir.join("target/release").join(name)
-    }
-
-    /// The example guest package's `src/bin/`: each file there builds as a guest.
-    pub fn guest_src_dir(&self) -> PathBuf {
-        self.dir.join("examples/program_deployment/methods/guest/src/bin")
-    }
-
-    /// The built example guests, by name, sorted.
-    pub fn guests(&self) -> Vec<String> {
-        let mut names: Vec<String> = fs::read_dir(self.bin_dir())
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|entry| {
-                let path = entry.path();
-                (path.extension()? == "bin")
-                    .then(|| path.file_stem()?.to_str().map(str::to_owned))
-                    .flatten()
-            })
-            .collect();
-        names.sort();
-        names
     }
 
     /// The execution gas limit the wallet declares on every transaction: `gas_limit` in
@@ -112,9 +80,12 @@ pub struct RepoInfo {
     /// `lez-dryrun` is built (or on PATH); without it, calls are sent unplanned.
     pub lez_dryrun: bool,
     pub lez_dryrun_checkout: bool,
+    /// `spel` is built (or on PATH); without it, lez-programs' programs can't be called.
+    pub spel: bool,
+    pub spel_checkout: bool,
 }
 
-fn git(dir: &Path, args: &[&str]) -> Option<String> {
+pub fn git(dir: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git").arg("-C").arg(dir).args(args).output().ok()?;
     output
         .status
@@ -137,5 +108,7 @@ pub fn repo_info(lez: &Lez) -> RepoInfo {
         lez_call_checkout: LEZ_CALL.has_checkout(),
         lez_dryrun: LEZ_DRYRUN.path().is_some(),
         lez_dryrun_checkout: LEZ_DRYRUN.has_checkout(),
+        spel: SPEL.path().is_some(),
+        spel_checkout: SPEL.has_checkout(),
     }
 }

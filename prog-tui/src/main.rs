@@ -1,4 +1,4 @@
-//! prog-tui: deploy and test the LEZ example programs locally.
+//! prog-tui: deploy and test lez-programs' programs and your own guests on a local LEZ.
 //! See README.md for what each pane and key does.
 
 mod app;
@@ -7,8 +7,10 @@ mod guest_bin;
 mod jobs;
 mod lez;
 mod lez_call;
+mod programs;
 mod rpc;
 mod sequencer;
+mod spel;
 mod state;
 mod tools;
 mod ui;

@@ -8,20 +8,39 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::lez::Lez;
+use crate::{
+    lez::Lez,
+    programs::{DEFAULT_PROGRAMS_DIR, Programs},
+    tools::SPEL,
+};
 
 /// Where the LEZ checkout sits relative to this crate, as the repos are laid out now.
 pub const DEFAULT_LEZ_DIR: &str = "../../logos-execution-zone";
 
+/// Where a guest comes from, which decides how it's built and called.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Origin {
+    /// One of lez-programs' programs, by name (`programs/<name>`): called with `spel` and its IDL.
+    Program(String),
+    /// `jz-progs/example_progs/<name>.rs`, built as `jz_<name>` in lez-programs' `jz/` package:
+    /// called with `lez-call` and `lez-dryrun`.
+    Jz,
+    /// Deployed by an older prog-tui (one of LEZ's example guests, say): not known here.
+    #[default]
+    Unknown,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Deployment {
-    /// The guest's name, e.g. `hello_world`.
+    /// The guest's name, e.g. `token` or `jz_hello_world`.
     pub name: String,
     /// The header account id, which is the program's address.
     pub program_id: String,
     /// The program is no longer on chain (the chain was reset).
     #[serde(default)]
     pub stale: bool,
+    #[serde(default)]
+    pub origin: Origin,
 }
 
 /// An account outside the wallet whose state the Accounts pane shows, such as a program's PDA.
@@ -37,6 +56,8 @@ pub struct Watched {
 pub struct Saved {
     /// As entered: absolute, `~/…`, or relative to this crate's directory.
     pub lez_dir: String,
+    /// The lez-programs checkout, entered the same way.
+    pub programs_dir: String,
     pub payer: Option<String>,
     pub account: Option<String>,
     /// The wallet storage's password, given to every wallet command as `LEE_WALLET_PASSWORD`.
@@ -50,6 +71,7 @@ impl Default for Saved {
     fn default() -> Self {
         Self {
             lez_dir: DEFAULT_LEZ_DIR.to_owned(),
+            programs_dir: DEFAULT_PROGRAMS_DIR.to_owned(),
             payer: None,
             account: None,
             wallet_password: "prog-tui".to_owned(),
@@ -68,13 +90,13 @@ impl Saved {
     }
 
     /// Writes `state.json` and `env.sh`.
-    pub fn save(&self, state_dir: &Path, lez: &Lez) -> anyhow::Result<()> {
+    pub fn save(&self, state_dir: &Path, lez: &Lez, programs: &Programs) -> anyhow::Result<()> {
         fs::create_dir_all(state_dir)?;
         fs::write(
             state_dir.join("state.json"),
             serde_json::to_string_pretty(self)?,
         )?;
-        fs::write(env_sh_path(state_dir), env_sh(self, lez))?;
+        fs::write(env_sh_path(state_dir), env_sh(self, lez, programs))?;
         Ok(())
     }
 
@@ -112,11 +134,12 @@ pub fn env_sh_path(state_dir: &Path) -> PathBuf {
     state_dir.join("env.sh")
 }
 
-/// Resolves `lez_dir` against this crate's directory, expanding a leading `~/`.
-pub fn resolve_lez_dir(crate_dir: &Path, lez_dir: &str) -> PathBuf {
-    let path = match (lez_dir.strip_prefix("~/"), std::env::var_os("HOME")) {
+/// Resolves a checkout's directory as entered against this crate's directory, expanding a
+/// leading `~/`.
+pub fn resolve_dir(crate_dir: &Path, dir: &str) -> PathBuf {
+    let path = match (dir.strip_prefix("~/"), std::env::var_os("HOME")) {
         (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
-        _ => PathBuf::from(lez_dir),
+        _ => PathBuf::from(dir),
     };
     let path = if path.is_absolute() {
         path
@@ -131,7 +154,7 @@ pub fn shell_quote(value: &str) -> String {
 }
 
 /// A script that exports the walkthrough's variables, for `source` in bash or zsh.
-pub fn env_sh(saved: &Saved, lez: &Lez) -> String {
+pub fn env_sh(saved: &Saved, lez: &Lez, programs: &Programs) -> String {
     let mut out = String::from(
         "# Written by prog-tui on every change. Load it into your shell with: source <this file>\n",
     );
@@ -146,7 +169,12 @@ pub fn env_sh(saved: &Saved, lez: &Lez) -> String {
     export("LEE_WALLET_PASSWORD", &saved.wallet_password);
     // `lez-call call` runs this wallet.
     export("LEZ_WALLET", &lez.release_bin("wallet").display().to_string());
-    export("BIN", &lez.bin_dir().display().to_string());
+    export("PROGRAMS_DIR", &programs.dir.display().to_string());
+    // The built jz guests (`example_progs`), for `lez-dryrun source-of --bin-dir`.
+    export("JZ_BIN", &programs.jz_bin_dir().display().to_string());
+    if let Some(spel) = SPEL.path() {
+        export("SPEL", &spel.display().to_string());
+    }
     if let Some(payer) = &saved.payer {
         export("PAYER", payer);
     }
@@ -174,26 +202,33 @@ mod tests {
             account: None,
             deployments: vec![
                 Deployment {
-                    name: "hello_world".into(),
+                    name: "token".into(),
                     program_id: "OLD".into(),
                     stale: true,
+                    origin: Origin::Program("token".into()),
                 },
                 Deployment {
-                    name: "hello_world".into(),
+                    name: "token".into(),
                     program_id: "NEW".into(),
                     stale: false,
+                    origin: Origin::Program("token".into()),
                 },
             ],
             ..Saved::default()
         };
         let lez = Lez::new(PathBuf::from("/x/it's"));
-        let script = env_sh(&saved, &lez);
+        let programs = Programs::new(PathBuf::from("/y/lez-programs"));
+        let script = env_sh(&saved, &lez, &programs);
         assert!(script.contains("export LEZ_DIR='/x/it'\\''s'\n"));
         assert!(script.contains("export LEE_WALLET_PASSWORD='prog-tui'\n"));
         assert!(script.contains("export LEZ_WALLET='/x/it'\\''s/target/release/wallet'\n"));
         assert!(script.contains("export PAYER='PAY'\n"));
         assert!(!script.contains("ACCOUNT="));
-        assert!(script.contains("export PROGRAM_HELLO_WORLD='NEW'\n"));
+        assert!(script.contains("export PROGRAMS_DIR='/y/lez-programs'\n"));
+        assert!(script.contains(
+            "export JZ_BIN='/y/lez-programs/target/riscv-guest/jz-methods/jz-guest/riscv32im-risc0-zkvm-elf/release'\n"
+        ));
+        assert!(script.contains("export PROGRAM_TOKEN='NEW'\n"));
         assert!(!script.contains("OLD"));
     }
 
@@ -211,5 +246,23 @@ mod tests {
         );
         saved.clear_chain();
         assert!(saved.watched.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+
+    /// A state.json from before origins: its deployments load as unknown.
+    #[test]
+    fn old_deployments_load_as_unknown() {
+        let saved: Saved = serde_json::from_str(
+            r#"{"lez_dir":"../../logos-execution-zone","deployments":[{"name":"hello_world","program_id":"X"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(saved.deployments[0].origin, Origin::Unknown);
+        assert_eq!(saved.programs_dir, DEFAULT_PROGRAMS_DIR);
+        let json = serde_json::to_string(&Origin::Program("token".into())).unwrap();
+        assert_eq!(serde_json::from_str::<Origin>(&json).unwrap(), Origin::Program("token".into()));
     }
 }

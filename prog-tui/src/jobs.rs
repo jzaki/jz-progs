@@ -22,16 +22,15 @@ use tokio::{
 use crate::{
     guest_bin,
     lez::{Lez, RepoInfo, repo_info},
-    lez_call::{self, Seed},
+    lez_call::Seed,
+    programs::{Guest, Programs, ProgramsInfo, programs_info, relative, state_type},
     rpc::{AccountView, Rpc, describe_bytes, unhex},
     sequencer::{self, SeqStatus, StopTarget},
-    state::Deployment,
-    tools::{LEZ_CALL, LEZ_DRYRUN, Tool},
+    spel::{self, SpelCall},
+    state::{Deployment, Origin},
+    tools::{LEZ_CALL, LEZ_DRYRUN, SPEL, Tool},
     userprogs,
-    wallet::{
-        WalletAccount, is_noise, parse_account_list, parse_json_line, parse_new_account,
-        parse_program_ids,
-    },
+    wallet::{WalletAccount, is_noise, parse_account_list, parse_json_line, parse_new_account},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +44,7 @@ pub enum StepState {
 #[derive(Clone, Debug, Default)]
 pub struct Status {
     pub repo: RepoInfo,
+    pub programs: ProgramsInfo,
     pub seq: SeqStatus,
 }
 
@@ -61,6 +61,8 @@ pub enum Msg {
     Views(BTreeMap<String, Option<AccountView>>),
     SetPayer(String),
     SetAccount(String),
+    /// An actor state decoded through its spel IDL: `(account, program, bytes)` and the text.
+    Decoded((String, String, Vec<u8>), String),
     Deployed(Deployment),
     /// Show this account's state in the Accounts pane: `(id, note)`.
     Watch(String, String),
@@ -68,7 +70,7 @@ pub enum Msg {
     Plan {
         title: String,
         lines: Vec<String>,
-        call: Option<PlannedCall>,
+        call: Option<Planned>,
     },
     /// The chain and wallet were wiped.
     ChainReset,
@@ -76,10 +78,11 @@ pub enum Msg {
     Step(usize, StepState),
 }
 
-/// What a job gets: the repo, the RPC, a channel to the UI, and its own log file.
+/// What a job gets: the checkouts, the RPC, a channel to the UI, and its own log file.
 pub struct Ctx {
     tx: UnboundedSender<Msg>,
     pub lez: Lez,
+    pub programs: Programs,
     pub state_dir: PathBuf,
     pub rpc: Rpc,
     pub password: String,
@@ -89,6 +92,8 @@ pub struct Ctx {
 
 pub struct CmdOut {
     pub ok: bool,
+    /// The exit code; `None` when a signal ended it.
+    pub code: Option<i32>,
     pub out: String,
 }
 
@@ -96,6 +101,7 @@ impl Ctx {
     pub fn new(
         tx: UnboundedSender<Msg>,
         lez: Lez,
+        programs: Programs,
         state_dir: PathBuf,
         rpc: Rpc,
         password: String,
@@ -114,6 +120,7 @@ impl Ctx {
         Self {
             tx,
             lez,
+            programs,
             state_dir,
             rpc,
             password,
@@ -141,7 +148,7 @@ impl Ctx {
     }
 
     /// A command in the LEZ repo, with the wallet home and password set and the wallet's
-    /// transaction dumps suppressed.
+    /// transaction dumps suppressed. `current_dir` moves it elsewhere, keeping the rest.
     pub fn command(&self, program: impl AsRef<OsStr>) -> Command {
         let mut command = Command::new(program);
         command
@@ -170,7 +177,7 @@ impl Ctx {
         command
     }
 
-    /// A `lez-call` or `lez-dryrun` command, with `LEZ_WALLET` naming LEZ's wallet.
+    /// A `lez-call`, `lez-dryrun` or `spel` command, with `LEZ_WALLET` naming LEZ's wallet.
     pub fn tool(&self, tool: &Tool, args: &[String]) -> anyhow::Result<Command> {
         let path = tool
             .path()
@@ -243,6 +250,7 @@ impl Ctx {
         }
         Ok(CmdOut {
             ok: status.success(),
+            code: status.code(),
             out,
         })
     }
@@ -259,7 +267,7 @@ async fn forward_lines(pipe: impl AsyncRead + Unpin, tx: UnboundedSender<String>
 
 // ---- Read-only refreshes ----
 
-pub async fn gather_status(lez: Lez, state_dir: PathBuf, rpc: Rpc) -> Status {
+pub async fn gather_status(lez: Lez, programs: Programs, state_dir: PathBuf, rpc: Rpc) -> Status {
     let url = rpc.url.clone();
     let blocking = tokio::task::spawn_blocking(move || {
         let port_open = sequencer::port_open(&url);
@@ -269,15 +277,15 @@ pub async fn gather_status(lez: Lez, state_dir: PathBuf, rpc: Rpc) -> Status {
             listener: port_open.then(|| sequencer::listener_pid(&url)).flatten(),
             ..SeqStatus::default()
         };
-        (repo_info(&lez), seq)
+        (repo_info(&lez), programs_info(&programs), seq)
     })
     .await;
-    let (repo, mut seq) = blocking.unwrap_or_default();
+    let (repo, programs, mut seq) = blocking.unwrap_or_default();
     if seq.port_open && rpc.healthy().await {
         seq.healthy = true;
         seq.block = rpc.last_block().await;
     }
-    Status { repo, seq }
+    Status { repo, programs, seq }
 }
 
 /// `wallet account list`, without logging.
@@ -294,6 +302,42 @@ pub async fn list_accounts(lez: &Lez, password: &str) -> anyhow::Result<Vec<Wall
     Ok(parse_account_list(&String::from_utf8_lossy(&output.stdout)))
 }
 
+/// `spel inspect <account>` through `idl`, as one line of JSON: the account's actor state under
+/// `program`, decoded. `None` when spel isn't built, or can't decode it.
+pub async fn spel_decode(
+    lez: &Lez,
+    password: &str,
+    idl: &Path,
+    program: &str,
+    account: &str,
+) -> Option<String> {
+    let output = Command::new(SPEL.path()?)
+        .args(["--idl"])
+        .arg(idl)
+        .args(["--program", program, "inspect", account])
+        .current_dir(&lez.dir)
+        .env("LEE_WALLET_HOME_DIR", lez.wallet_home())
+        .env("LEE_WALLET_PASSWORD", password)
+        .env("SUPPRESS_VERBOSE_PRINTS", "1")
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_inspect(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// One line of JSON from `spel inspect`'s stdout, which is just the decoded state: the
+/// `(account, program): N bytes` line goes to stderr. Falls back to dropping a first line, in case
+/// a spel prints it on stdout.
+fn parse_inspect(stdout: &str) -> Option<String> {
+    let parse = |text: &str| serde_json::from_str::<serde_json::Value>(text).ok();
+    let value = parse(stdout).or_else(|| parse(stdout.split_once('\n')?.1))?;
+    Some(value.to_string())
+}
+
 pub async fn fetch_views(rpc: &Rpc, ids: Vec<String>) -> BTreeMap<String, Option<AccountView>> {
     let mut views = BTreeMap::new();
     for id in ids {
@@ -306,9 +350,22 @@ pub async fn fetch_views(rpc: &Rpc, ids: Vec<String>) -> BTreeMap<String, Option
 
 // ---- Job steps ----
 
-/// Links every `example_progs/*.rs` into LEZ's guest package and drops links whose file is gone.
+/// Writes lez-programs' `jz/` package where it's missing or stale, links every
+/// `example_progs/*.rs` into it, and drops links (and builds) whose file is gone.
 pub fn sync_example_progs(ctx: &mut Ctx) -> anyhow::Result<()> {
-    let guest_src = ctx.lez.guest_src_dir();
+    if !ctx.programs.present() {
+        bail!(
+            "no lez-programs checkout at {} (key L to change it)",
+            ctx.programs.dir.display()
+        );
+    }
+    if ctx.programs.write_jz_package()? {
+        ctx.log(format!(
+            "wrote the jz guest package at {}",
+            ctx.programs.jz_dir().display()
+        ));
+    }
+    let guest_src = ctx.programs.jz_src_dir();
     for file in userprogs::sources(&userprogs::example_dir()) {
         let (name, linked) = userprogs::link(&file, &guest_src)?;
         if linked != userprogs::Linked::Unchanged {
@@ -316,9 +373,9 @@ pub fn sync_example_progs(ctx: &mut Ctx) -> anyhow::Result<()> {
         }
     }
     for name in userprogs::prune(&guest_src) {
-        // The Guests list reads $BIN, so drop what the build left there too: the program
-        // binary, the raw ELF and its dep-info file.
-        let bin_dir = ctx.lez.bin_dir();
+        // The Guests list reads the built jz guests, so drop what the build left too: the
+        // program binary, the raw ELF and its dep-info file.
+        let bin_dir = ctx.programs.jz_bin_dir();
         for built in [format!("{name}.bin"), name.clone(), format!("{name}.d")] {
             let _ = std::fs::remove_file(bin_dir.join(built));
         }
@@ -327,60 +384,187 @@ pub fn sync_example_progs(ctx: &mut Ctx) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn build(ctx: &mut Ctx) -> anyhow::Result<()> {
+/// Builds the jz guests: lez-programs' `jz/` package, into lez-programs' `target/`. It runs in
+/// the lez-programs checkout, so it uses that checkout's toolchain.
+async fn build_jz(ctx: &mut Ctx) -> anyhow::Result<()> {
     sync_example_progs(ctx)?;
+    if userprogs::sources(&userprogs::example_dir()).is_empty() {
+        ctx.log("no example_progs/*.rs: no jz guests to build");
+        return Ok(());
+    }
+    let manifest = ctx.programs.jz_manifest();
     let mut command = ctx.command("cargo");
-    command.args([
-        "build",
-        "--release",
-        "-p",
-        "wallet",
-        "-p",
-        "program_deployment",
-        "-p",
-        "example_program_deployment_methods",
-    ]);
-    ctx.run_ok(
-        "cargo build --release -p wallet -p program_deployment -p example_program_deployment_methods",
-        command,
-    )
-    .await?;
-    for tool in [LEZ_CALL, LEZ_DRYRUN] {
+    command
+        .args(["build", "--release", "--manifest-path"])
+        .arg(&manifest)
+        .args(["--target-dir", "target"])
+        .current_dir(&ctx.programs.dir);
+    let label = format!(
+        "cargo build --release --manifest-path {} --target-dir target  (in lez-programs)",
+        relative(&manifest, &ctx.programs.dir).display()
+    );
+    ctx.run_ok(&label, command).await?;
+    Ok(())
+}
+
+/// Builds lez-programs' programs (their methods crates build the guests, with no Docker), then
+/// regenerates their IDLs with lez-programs' own `make idl`.
+async fn build_programs(ctx: &mut Ctx) -> anyhow::Result<()> {
+    let programs = ctx.programs.programs();
+    if programs.is_empty() {
+        ctx.log(format!(
+            "no programs found in {}: nothing of lez-programs to build",
+            ctx.programs.dir.display()
+        ));
+        return Ok(());
+    }
+    let mut args = vec!["build".to_owned(), "--release".to_owned()];
+    for program in &programs {
+        args.extend(["-p".to_owned(), program.methods.clone()]);
+    }
+    let mut command = ctx.command("cargo");
+    command.args(&args).current_dir(&ctx.programs.dir);
+    ctx.run_ok(&format!("cargo {}  (in lez-programs)", args.join(" ")), command)
+        .await?;
+    let mut command = ctx.command("make");
+    command.arg("idl").current_dir(&ctx.programs.dir);
+    ctx.run_ok("make idl  (in lez-programs)", command).await?;
+    Ok(())
+}
+
+/// Generates a spel IDL for each jz guest, with `spel generate-idl` over a one-file crate whose
+/// `src/lib.rs` links to the guest's source: `jz/idl/<guest>.json`. A guest whose message isn't an
+/// `enum Message` gets none, and is called with `lez-call` instead. Drops IDLs whose source is gone.
+pub async fn build_jz_idls(ctx: &mut Ctx) -> anyhow::Result<()> {
+    if SPEL.path().is_none() {
+        ctx.log("spel isn't built: no IDLs for the jz guests, so they're called with lez-call");
+        return Ok(());
+    }
+    let idl_dir = ctx.programs.jz_idl_dir();
+    fs::create_dir_all(idl_dir.join("src"))?;
+    let mut names = Vec::new();
+    for file in userprogs::sources(&userprogs::example_dir()) {
+        let name = userprogs::guest_name(&file)?;
+        let dir = ctx.programs.jz_idl_crate(&name);
+        fs::create_dir_all(dir.join("src"))?;
+        fs::write(
+            dir.join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"),
+        )?;
+        let link = dir.join("src/lib.rs");
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(fs::canonicalize(&file)?, &link)?;
+        let state = state_type(&fs::read_to_string(&file)?);
+        let mut generated = None;
+        let mut error = String::new();
+        // With the state type when the source names one, then without: spel refuses a state it
+        // can't describe, and an IDL without the state still encodes every message.
+        let attempts = match state.as_deref() {
+            Some(state) => vec![Some(state), None],
+            None => vec![None],
+        };
+        for state in attempts {
+            let mut args = vec![
+                "generate-idl".to_owned(),
+                dir.display().to_string(),
+                "--message".to_owned(),
+                "Message".to_owned(),
+            ];
+            if let Some(state) = state {
+                args.extend(["--state".to_owned(), state.to_owned()]);
+            }
+            let output = ctx.tool(&SPEL, &args)?.output().await?;
+            if output.status.success() {
+                generated = Some(output.stdout);
+                break;
+            }
+            error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        }
+        match generated {
+            Some(idl) => {
+                fs::write(ctx.programs.jz_idl(&name), idl)?;
+                names.push(name);
+            }
+            None => {
+                let _ = fs::remove_file(ctx.programs.jz_idl(&name));
+                ctx.log(format!("no spel IDL for {name} (it's called with lez-call): {error}"));
+            }
+        }
+    }
+    // Drop IDLs and crates whose source is gone.
+    for entry in fs::read_dir(&idl_dir)?.flatten() {
+        let path = entry.path();
+        let stem = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default().to_owned();
+        if path.extension().is_some_and(|ext| ext == "json") && !names.contains(&stem) {
+            let _ = fs::remove_file(&path);
+            let _ = fs::remove_dir_all(ctx.programs.jz_idl_crate(&stem));
+        }
+    }
+    if !names.is_empty() {
+        ctx.log(format!("spel IDLs for {}", names.join(", ")));
+    }
+    Ok(())
+}
+
+/// LEZ's wallet; lez-programs' programs and their IDLs; the jz guests; then `lez-call`,
+/// `lez-dryrun` and `spel` in their own checkouts; then the jz guests' spel IDLs.
+pub async fn build(ctx: &mut Ctx) -> anyhow::Result<()> {
+    let mut command = ctx.command("cargo");
+    command.args(["build", "--release", "-p", "wallet"]);
+    ctx.run_ok("cargo build --release -p wallet  (in LEZ)", command)
+        .await?;
+    if !ctx.programs.present() {
+        bail!(
+            "no lez-programs checkout at {} (key L to change it)",
+            ctx.programs.dir.display()
+        );
+    }
+    build_programs(ctx).await?;
+    // The jz package builds every example_progs file at once, so one that doesn't compile stops
+    // them all. That shouldn't stop lez-programs' programs and the tools, or the walkthrough.
+    if let Err(error) = build_jz(ctx).await {
+        ctx.log(format!(
+            "✗ the jz guests didn't build ({error:#}): the error is above. Fix the file, or move \
+             it out of example_progs; the rest of the build goes on"
+        ));
+    }
+    for tool in [LEZ_CALL, LEZ_DRYRUN, SPEL] {
         let checkout = tool.checkout();
         if !tool.has_checkout() {
             ctx.log(format!("no {} checkout at {}: not building it", tool.name, checkout.display()));
             continue;
         }
         let mut command = ctx.command("cargo");
-        command.args(["build", "--release"]).current_dir(&checkout);
+        command
+            .args(["build", "--release"])
+            .args(tool.build_args)
+            .current_dir(&checkout);
+        let extra = if tool.build_args.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", tool.build_args.join(" "))
+        };
         ctx.run_ok(
-            &format!("cargo build --release  (in {})", checkout.display()),
+            &format!("cargo build --release{extra}  (in {})", checkout.display()),
             command,
         )
         .await?;
     }
-    Ok(())
+    build_jz_idls(ctx).await
 }
 
-/// Links `file` into LEZ's guest package, builds the guests, and deploys it as `jz_<stem>`.
+/// Links `file` into lez-programs' `jz/` package, builds the jz guests, and deploys it as
+/// `jz_<stem>`.
 pub async fn build_and_deploy(ctx: &mut Ctx, file: &Path, payer: &str) -> anyhow::Result<()> {
-    let (name, linked) = userprogs::link(file, &ctx.lez.guest_src_dir())?;
-    ctx.log(format!(
-        "{} {} → guest {name}",
-        match linked {
-            userprogs::Linked::Unchanged => "already linked:",
-            _ => "linked",
-        },
-        file.display()
-    ));
-    let mut command = ctx.command("cargo");
-    command.args(["build", "--release", "-p", "example_program_deployment_methods"]);
-    ctx.run_ok(
-        "cargo build --release -p example_program_deployment_methods",
-        command,
-    )
-    .await?;
-    deploy(ctx, &name, payer).await?;
+    let name = userprogs::guest_name(file)?;
+    build_jz(ctx).await?;
+    build_jz_idls(ctx).await?;
+    let guest = Guest {
+        bin: ctx.programs.jz_bin(&name),
+        name,
+        origin: Origin::Jz,
+    };
+    deploy(ctx, &guest, payer).await?;
     Ok(())
 }
 
@@ -503,8 +687,9 @@ pub async fn choose_payer(ctx: &mut Ctx) -> anyhow::Result<String> {
 /// Deploys a built guest through `program_loader`: a fresh header account and one fresh segment
 /// account per chunk of its code, then `wallet program-loader deploy`, paid by `payer` (the new
 /// accounts can't pay for their own claim). The header's id is the program's id.
-pub async fn deploy(ctx: &mut Ctx, guest: &str, payer: &str) -> anyhow::Result<Deployment> {
-    let bin = ctx.lez.guest_bin(guest);
+pub async fn deploy(ctx: &mut Ctx, guest: &Guest, payer: &str) -> anyhow::Result<Deployment> {
+    let bin = guest.bin.clone();
+    let name = guest.name.as_str();
     if !bin.is_file() {
         bail!("{} doesn't exist; build first (key b)", bin.display());
     }
@@ -526,17 +711,18 @@ pub async fn deploy(ctx: &mut Ctx, guest: &str, payer: &str) -> anyhow::Result<D
     args.extend(["--payer".to_owned(), format!("Public/{payer}")]);
     let command = ctx.wallet(&args.iter().map(String::as_str).collect::<Vec<_>>());
     let output = ctx
-        .run_ok(&format!("wallet program-loader deploy {guest}"), command)
+        .run_ok(&format!("wallet program-loader deploy {name}"), command)
         .await?;
     if !output.contains(&format!("Header account id: {header}")) {
-        bail!("the wallet didn't report deploying {guest} at {header}");
+        bail!("the wallet didn't report deploying {name} at {header}");
     }
     let program_id = header;
-    ctx.log(format!("deployed {guest} → {program_id}"));
+    ctx.log(format!("deployed {name} → {program_id}"));
     let deployment = Deployment {
-        name: guest.to_owned(),
+        name: name.to_owned(),
         program_id,
         stale: false,
+        origin: guest.origin.clone(),
     };
     ctx.send(Msg::Deployed(deployment.clone()));
     Ok(deployment)
@@ -579,6 +765,48 @@ pub struct PlannedCall {
     /// The PDAs the call declares, to watch.
     pub pdas: Vec<String>,
 }
+
+/// A call on screen, ready to send once confirmed.
+#[derive(Clone, Debug)]
+pub enum Planned {
+    /// A jz guest's: `wallet program call`, planned by `lez-dryrun`.
+    Wallet(PlannedCall),
+    /// A lez-programs program's: `spel send`, which simulates before it sends.
+    Spel(SpelCall),
+}
+
+impl Planned {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Wallet(call) => &call.name,
+            Self::Spel(call) => &call.name,
+        }
+    }
+
+    /// What Enter runs, for the plan pane's footer.
+    pub fn sender(&self) -> &'static str {
+        match self {
+            Self::Wallet(_) => "wallet program call",
+            Self::Spel(_) => "spel send",
+        }
+    }
+}
+
+/// Whether LEZ's wallet has `program call` (PR #989, after v0.4.0-rc3), which sends a jz
+/// guest's call.
+async fn wallet_can_call(ctx: &mut Ctx) -> bool {
+    let command = ctx.wallet(&["program", "call", "--help"]);
+    ctx.run_quiet("wallet program call --help", command)
+        .await
+        .is_ok_and(|output| output.ok)
+}
+
+/// Why a jz guest's call can't be sent with this wallet.
+const NO_PROGRAM_CALL: [&str; 3] = [
+    "✗ not sendable: this LEZ wallet has no `program call` (PR #989, merged after v0.4.0-rc3).",
+    "  The plan above stands; sending it needs a LEZ checkout whose wallet has `program call`.",
+    "  lez-programs' programs (token, nft) don't need it: they're called with spel.",
+];
 
 /// What `prepare` found: the plan's text, and the call when it can be sent.
 pub struct Prepared {
@@ -658,6 +886,12 @@ pub async fn prepare(ctx: &mut Ctx, request: &CallRequest) -> anyhow::Result<Pre
             changes: Vec::new(),
             pdas: Vec::new(),
         };
+        let mut lines = lines;
+        if !wallet_can_call(ctx).await {
+            lines.push(String::new());
+            lines.extend(NO_PROGRAM_CALL.map(str::to_owned));
+            return Ok(Prepared { lines, call: None });
+        }
         return Ok(Prepared {
             lines,
             call: Some(call),
@@ -755,6 +989,10 @@ pub async fn prepare(ctx: &mut Ctx, request: &CallRequest) -> anyhow::Result<Pre
         .collect();
     let wallet_args = strings(&plan["wallet_args"]);
     lines.push(String::new());
+    if !wallet_can_call(ctx).await {
+        lines.extend(NO_PROGRAM_CALL.map(str::to_owned));
+        return Ok(Prepared { lines, call: None });
+    }
     lines.extend(wallet_dry_run(ctx, &wallet_args).await);
     let call = PlannedCall {
         name: request.name.clone(),
@@ -810,12 +1048,96 @@ pub async fn plan(ctx: &mut Ctx, title: String, request: CallRequest) -> anyhow:
     ctx.send(Msg::Plan {
         title,
         lines: prepared.lines,
-        call: prepared.call,
+        call: prepared.call.map(Planned::Wallet),
     });
     if !ok {
-        bail!("the dry run failed: nothing was sent");
+        bail!("nothing to send: see the plan");
     }
     Ok(())
+}
+
+/// Plans a lez-programs program's call with `spel send --dry-run`: the actors it declares and
+/// why, the signers, and the encoded message. The plan goes to the UI, to confirm before
+/// [`spel_call`] sends it.
+pub async fn spel_plan(ctx: &mut Ctx, title: String, call: SpelCall) -> anyhow::Result<()> {
+    let accounts = list_accounts(&ctx.lez, &ctx.password).await?;
+    let labels = accounts
+        .iter()
+        .filter(|account| account.public)
+        .filter_map(|account| Some((account.label.clone()?, account.id.clone())))
+        .collect();
+    let call = spel::resolve_shorthands(&call, &labels).map_err(|error| anyhow!(error))?;
+    let args = call.args(true);
+    let command = ctx.tool(&SPEL, &args)?;
+    let output = ctx.run_quiet(&format!("spel {}", args.join(" ")), command).await?;
+    let mut lines: Vec<String> = output
+        .out
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_owned)
+        .collect();
+    lines.push(String::new());
+    lines.push(
+        "Enter sends it: spel simulates first and doesn't send a call that would be refused.".to_owned(),
+    );
+    lines.push(String::new());
+    lines.push("same call by hand (source env.sh first):".to_owned());
+    lines.push(format!("  {}", call.command_line()));
+    let ok = output.ok;
+    ctx.send(Msg::Plan {
+        title,
+        lines,
+        call: ok.then_some(Planned::Spel(call)),
+    });
+    if !ok {
+        bail!("spel couldn't plan the call: see the plan");
+    }
+    Ok(())
+}
+
+/// Sends a lez-programs program's call with `spel send`. spel simulates it first and sends
+/// nothing that would be refused; once it's included, it prints each declared actor that changed.
+pub async fn spel_call(ctx: &mut Ctx, call: &SpelCall) -> anyhow::Result<()> {
+    let log_offset = sequencer::log_len(&ctx.state_dir);
+    let managed = sequencer::managed_pgid(&ctx.state_dir).is_some();
+    let args = call.args(false);
+    let command = ctx.tool(&SPEL, &args)?;
+    let output = ctx
+        .run(&format!("spel send {} ({})", spel::kebab(&call.message), call.name), command)
+        .await?;
+    if output.ok {
+        return Ok(());
+    }
+    // spel exits with EXIT_NO_CHANGE for a refusal in simulation (nothing sent) and for an
+    // included call that changed nothing; anything else is a failure to send.
+    if output.code != Some(spel::EXIT_NO_CHANGE) {
+        bail!("spel send failed");
+    }
+    if output.out.contains("Refused in simulation") {
+        bail!("refused in simulation, so nothing was sent");
+    }
+    report_revert(ctx, log_offset, managed).await;
+    bail!("included, but nothing changed: a no-op, or a refusal the simulation didn't foresee")
+}
+
+/// `spel inspect <account>` decoded through `idl`: the account's actor state under `program`.
+pub async fn spel_inspect(
+    ctx: &mut Ctx,
+    idl: &Path,
+    program: &str,
+    account: &str,
+) -> anyhow::Result<String> {
+    let args = vec![
+        "--idl".to_owned(),
+        idl.display().to_string(),
+        "--program".to_owned(),
+        program.to_owned(),
+        "inspect".to_owned(),
+        account.to_owned(),
+    ];
+    let command = ctx.tool(&SPEL, &args)?;
+    ctx.run_ok(&format!("spel inspect {}", short(account)), command)
+        .await
 }
 
 /// Sends a planned call with `wallet program call`, then checks each state its dry run said it
@@ -1035,63 +1357,6 @@ pub fn parse_amount(text: &str) -> Option<u128> {
     text.trim().parse().ok().filter(|amount| *amount > 0)
 }
 
-/// The guests a runner deploys, in deploy order: the `.bin` arguments' names. The tail-call
-/// runners take the caller's `.bin` first and deploy it first.
-fn runner_guests(args: &[String]) -> Vec<String> {
-    args.iter()
-        .filter_map(|arg| Path::new(arg).file_name()?.to_str()?.strip_suffix(".bin"))
-        .map(str::to_owned)
-        .collect()
-}
-
-/// Runs a stock `run_*` runner, and registers the programs it deployed (it prints their ids).
-pub async fn runner(ctx: &mut Ctx, args: &[String]) -> anyhow::Result<()> {
-    let (name, rest) = args.split_first().ok_or_else(|| anyhow!("no runner"))?;
-    let mut command = ctx.command(ctx.lez.release_bin(name));
-    command.args(rest);
-    let output = ctx.run_ok(&args.join(" "), command).await?;
-
-    let guests = runner_guests(rest);
-    let ids = parse_program_ids(&output);
-    if guests.len() == ids.len() {
-        for (guest, program_id) in guests.into_iter().zip(ids) {
-            ctx.log(format!("deployed {guest} → {program_id}"));
-            ctx.send(Msg::Deployed(Deployment {
-                name: guest,
-                program_id,
-                stale: false,
-            }));
-        }
-    } else {
-        ctx.log(format!(
-            "the runner printed {} program id(s) for {} guest(s): not registering them. Rebuild (key b) if the runner is older than its `Deployed Program with` lines",
-            ids.len(),
-            guests.len()
-        ));
-    }
-    wait_for_next_block(ctx).await;
-    ctx.log("the runner doesn't check its call: look at the account's actor states");
-    Ok(())
-}
-
-/// The stock runners send their last call and exit without waiting for it. A job that started
-/// right after would read the payer's nonce before that call lands, and its first transaction
-/// would fail with `Nonce mismatch`. Everything sent before now is in the next block.
-async fn wait_for_next_block(ctx: &mut Ctx) {
-    let Some(start) = ctx.rpc.last_block().await else {
-        return;
-    };
-    ctx.log("waiting for the runner's last call to be included…");
-    let deadline = Instant::now() + Duration::from_mins(1);
-    while Instant::now() < deadline {
-        if ctx.rpc.last_block().await.is_some_and(|block| block > start) {
-            return;
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    ctx.log("no new block within a minute: wait before the next job");
-}
-
 pub fn short(id: &str) -> String {
     if id.len() > 8 {
         format!("{}…", &id[..8])
@@ -1103,13 +1368,16 @@ pub fn short(id: &str) -> String {
 // ---- The walkthrough ----
 
 pub const WALKTHROUGH: [&str; 6] = [
-    "Build wallet, runners, guests, lez-call",
+    "Build wallet, lez-programs, jz guests, tools",
     "Reset the chain, start the sequencer",
     "Initialise wallet, import test accounts",
     "Set PAYER, create ACCOUNT",
-    "Deploy hello_world",
-    "Call hello, check \"Hola mundo!\"",
+    "Deploy token",
+    "Create a token: 1000 to ACCOUNT, check it",
 ];
+
+/// The walkthrough's token supply, all minted to `ACCOUNT`.
+const WALKTHROUGH_SUPPLY: u128 = 1000;
 
 macro_rules! step {
     ($ctx:expr, $index:expr, $body:expr) => {{
@@ -1127,7 +1395,7 @@ macro_rules! step {
     }};
 }
 
-/// WALKTHROUGH.md, steps 1–5, from a clean chain.
+/// WALKTHROUGH.md, from a clean chain: lez-programs' token program, deployed and called with spel.
 pub async fn walkthrough(ctx: &mut Ctx, stop: Option<StopTarget>) -> anyhow::Result<()> {
     ctx.send(Msg::Checklist(
         WALKTHROUGH.iter().map(|step| (*step).to_owned()).collect(),
@@ -1144,74 +1412,62 @@ pub async fn walkthrough(ctx: &mut Ctx, stop: Option<StopTarget>) -> anyhow::Res
         anyhow::Ok((payer, account))
     }
     .await);
-    let greeting = "Hola mundo!";
-    if LEZ_CALL.path().is_some() {
-        let deployment = step!(ctx, 4, deploy(ctx, "hello_world", &payer).await);
-        step!(ctx, 5, async {
-            let program = deployment.program_id.clone();
-            let request = CallRequest {
-                payer: payer.clone(),
-                program_id: program.clone(),
-                name: deployment.name.clone(),
-                source: lez_call::source_of(&ctx.lez, "hello_world"),
-                to: account.clone(),
-                values: vec![format!("#0={greeting}")],
-                ..CallRequest::default()
-            };
-            let prepared = prepare(ctx, &request).await?;
-            for line in &prepared.lines {
-                ctx.log(line.clone());
-            }
-            let planned = prepared
-                .call
-                .ok_or_else(|| anyhow!("the dry run failed: nothing was sent"))?;
-            call(ctx, &planned).await?;
-            let state = ctx
-                .rpc
-                .account(&account)
-                .await?
-                .and_then(|view| view.actor_states.get(&program).cloned())
-                .unwrap_or_default();
-            check_greeting(&state, greeting)
-        }
-        .await);
-    } else {
-        // Without lez-call, the stock runner deploys and calls in one go.
-        ctx.log("lez-call isn't built: using run_hello_world, which deploys and calls");
-        step!(ctx, 4, async {
-            let bin = ctx.lez.guest_bin("hello_world").display().to_string();
-            runner(ctx, &["run_hello_world".to_owned(), bin, account.clone(), payer.clone()]).await
-        }
-        .await);
-        step!(ctx, 5, async {
-            let view = ctx.rpc.account(&account).await?.unwrap_or_default();
-            let state = view
-                .actor_states
-                .values()
-                .find(|state| state.as_slice() == greeting.as_bytes())
-                .cloned()
-                .unwrap_or_default();
-            check_greeting(&state, greeting)
-        }
-        .await);
+    let deployment = step!(ctx, 4, async {
+        let guest = ctx
+            .programs
+            .guests()
+            .into_iter()
+            .find(|guest| guest.origin == Origin::Program("token".to_owned()))
+            .ok_or_else(|| anyhow!("lez-programs has no token program"))?;
+        deploy(ctx, &guest, &payer).await
     }
+    .await);
+    step!(ctx, 5, async {
+        // A token's definition lives on an account of its own, which signs for it; the initial
+        // supply goes to ACCOUNT's holding, which signs too.
+        let definition = new_account(ctx, "jz-token").await?;
+        let idl = ctx.programs.idl("token");
+        let call = SpelCall {
+            name: deployment.name.clone(),
+            idl: idl.clone(),
+            program_id: deployment.program_id.clone(),
+            payer: payer.clone(),
+            message: "NewDefinition".to_owned(),
+            root: definition.clone(),
+            signers: vec![definition.clone(), account.clone()],
+            actors: Vec::new(),
+            fields: vec![
+                ("name".to_owned(), "JZ".to_owned()),
+                ("total_supply".to_owned(), WALKTHROUGH_SUPPLY.to_string()),
+                ("mint_authority".to_owned(), "none".to_owned()),
+                ("holding".to_owned(), account.clone()),
+            ],
+        };
+        ctx.log(format!("$ {}", call.command_line()));
+        spel_call(ctx, &call).await?;
+        let holding = spel_inspect(ctx, &idl, &deployment.program_id, &account).await?;
+        if !spel::shows_holding(&holding, WALKTHROUGH_SUPPLY) {
+            bail!("expected ACCOUNT to hold {WALKTHROUGH_SUPPLY} JZ, found: {}", holding.trim());
+        }
+        ctx.log(format!("✓ ACCOUNT holds {WALKTHROUGH_SUPPLY} JZ"));
+        anyhow::Ok(())
+    }
+    .await);
     Ok(())
-}
-
-fn check_greeting(state: &[u8], greeting: &str) -> anyhow::Result<()> {
-    if state == greeting.as_bytes() {
-        Ok(())
-    } else {
-        bail!(
-            "expected {greeting:?}, found {}",
-            describe_bytes(state)
-        )
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_spel_inspect_output() {
+        let json = "{\n  \"greetings\": \"test1\"\n}\n";
+        assert_eq!(parse_inspect(json).as_deref(), Some("{\"greetings\":\"test1\"}"));
+        let with_header = format!("(acc, prog): 9 bytes\n{json}");
+        assert_eq!(parse_inspect(&with_header).as_deref(), Some("{\"greetings\":\"test1\"}"));
+        assert_eq!(parse_inspect("nothing"), None);
+    }
 
     #[test]
     fn classifies_transfer_outcomes() {
@@ -1256,23 +1512,5 @@ mod tests {
             ["  fee payer:        A", "  action:           applies"]
         );
         assert!(dry_run_report("Error: no").is_empty());
-    }
-
-    #[test]
-    fn runner_guests_are_the_bin_arguments_in_order() {
-        let args: Vec<String> = [
-            "/lez/target/x/release/simple_tail_call.bin",
-            "/lez/target/x/release/hello_world.bin",
-            "8Ue4RiqZ",
-            "2RHZhw9h",
-        ]
-        .map(str::to_owned)
-        .to_vec();
-        assert_eq!(runner_guests(&args), ["simple_tail_call", "hello_world"]);
-        assert_eq!(
-            runner_guests(&["/x/hello_world.bin".to_owned(), "ACC".to_owned()]),
-            ["hello_world"]
-        );
-        assert!(runner_guests(&["ACC".to_owned()]).is_empty());
     }
 }

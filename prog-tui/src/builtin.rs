@@ -50,6 +50,28 @@ fn named_id(name: &str) -> String {
     bs58::encode(hasher.finalize()).into_string()
 }
 
+/// `CLOCK_PROGRAM_ACCOUNT_ID` in `lez/programs/clock/core/src/lib.rs`: the account that holds the
+/// clock's block id and timestamp.
+const CLOCK_ACCOUNT: &[u8; 32] = b"/LEZ/ClockProgramAccount/0000000";
+
+/// The clock's actor, `account@program` (`clock_core::clock_actor()`): what a program that reads
+/// the clock sends `ReadTimestamp` to, so a call to it declares this actor.
+pub fn clock_actor() -> String {
+    format!("{}@{}", bs58::encode(CLOCK_ACCOUNT).into_string(), named_id("clock"))
+}
+
+/// `PROGRAM_DERIVED_ACCOUNT_ID_PREFIX` in `lee/state_machine/core/src/program/mod.rs`.
+const PDA_PREFIX: &[u8; 32] = b"/LEE/v0.2/AccountId/PDA/\x00\x00\x00\x00\x00\x00\x00\x00";
+
+/// `AccountId::for_public_pda(program, seed)`: `SHA-256(PREFIX ‖ program ‖ seed)`, as base58.
+pub fn public_pda(program: &[u8; 32], seed: &[u8; 32]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(PDA_PREFIX);
+    hasher.update(program);
+    hasher.update(seed);
+    bs58::encode(hasher.finalize()).into_string()
+}
+
 /// Every built-in program, fixed ones first.
 pub fn builtins() -> Vec<Builtin> {
     let mut all = vec![
@@ -103,6 +125,16 @@ mod tests {
         for (name, id) in expected {
             assert_eq!(named_id(name), id, "{name}");
         }
+    }
+
+    /// Both computed by lee_core and clock_core at v0.4.0-rc3.
+    #[test]
+    fn derived_addresses_match_lee_core() {
+        assert_eq!(public_pda(&[7; 32], &[1; 32]), "B8eG72E2vv9kQRMotzFsRMyL4vvdVHZTArYZwtXLDinp");
+        assert_eq!(
+            clock_actor(),
+            "4BdcjoXkq786TMWcBGGHqcxeLYMZmn17rL4eM9ZyRWNT@2hwaRW8sMnyKLLRbDRw8k68tiv9bnfq98oxcdtcp157Z"
+        );
     }
 
     #[test]

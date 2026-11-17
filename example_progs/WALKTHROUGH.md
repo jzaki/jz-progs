@@ -1,6 +1,13 @@
 # Walkthrough: LEZ v0.4 (actor model) locally
 
-The commands from [INTRO.md](../INTRO.md) section 4, in the order you run them. The explanations stay in INTRO.md. It assumes the section 1 setup is done (toolchain, `logos-execution-zone` on `dev`) and that a local sequencer may already be running.
+The commands from [INTRO.md](../INTRO.md) section 4, in the order you run them. The explanations stay in INTRO.md. prog-tui's `W` runs the same steps.
+
+It assumes the section 1 setup is done, with three checkouts side by side in `logos-repos`:
+- `logos-execution-zone` at **`v0.4.0-rc3`**, the tag lez-programs pins;
+- `lez-programs`;
+- `spel` on its `refactor/lez-v0.4.x` branch, which pins the same tag.
+
+A local sequencer may already be running.
 
 ## 1. Reset to a clean chain
 
@@ -13,15 +20,22 @@ RISC0_DEV_MODE=1 just run-sequencer-standalone   # 127.0.0.1:3040; dev mode skip
 
 Leave it running. Revert reasons only appear in this terminal's log.
 
-## 2. Fresh terminal: environment
+## 2. Fresh terminal: build and environment
 
 ```bash
 cd logos-execution-zone && nix develop          # from logos-repos
+cargo build --release -p wallet                 # the wallet
+WALLET=$PWD/target/release/wallet
+export LEE_WALLET_HOME_DIR=$PWD/lez/wallet/configs/debug   # same home as `just run-wallet`; spel reads it too
 
-export LEE_WALLET_HOME_DIR=$PWD/lez/wallet/configs/debug   # same home as `just run-wallet`, so the runner reads it
-cargo build --release -p example_program_deployment_methods   # builds the guests; quick if already built
-BIN=$PWD/target/riscv-guest/example_program_deployment_methods/example_program_deployment_programs/riscv32im-risc0-zkvm-elf/release
+(cd ../lez-programs && cargo build --release -p token-methods -p nft-methods && make idl)   # the guests (local risc0, no Docker) and their IDLs
+(cd ../spel && cargo build --release --bin spel)
+SPEL=$PWD/../spel/target/release/spel
+TOKEN_BIN=$PWD/../lez-programs/target/riscv-guest/token-methods/token-guest/riscv32im-risc0-zkvm-elf/release/token.bin
+TOKEN_IDL=$PWD/../lez-programs/artifacts/token-idl.json
 ```
+
+lez-programs' `make build-programs` builds the same guests in Docker, into `target/guest/`. The methods crates build them with the local RISC Zero toolchain instead.
 
 ## 3. Wallet and accounts
 
@@ -29,55 +43,87 @@ BIN=$PWD/target/riscv-guest/example_program_deployment_methods/example_program_d
 
 ```bash
 export LEE_WALLET_PASSWORD=             # empty: no storage encryption and no prompts; set one to encrypt it
-just run-wallet check-health             # creates the wallet
+$WALLET check-health                     # creates the wallet
 just wallet-import-test-accounts         # imports the two genesis-funded test accounts and lists them
 PAYER=<first account id listed above>
-just run-wallet account new public       # the account hello_world writes to
+$WALLET account new public --label account   # the account the token's supply goes to
 ACCOUNT=<account id printed above>
 ```
 
-## 4. Deploy and call hello_world
+## 4. Deploy token
 
-The runner deploys through the program loader, then sends the call.
-
-```bash
-(cd examples/program_deployment && \
-  cargo run --release --bin run_hello_world -- "$BIN/hello_world.bin" "$ACCOUNT" "$PAYER")
-```
-
-**Expect about 1 MB of output.** The runner prints every transaction in full, including the program bytes in each segment upload, and that's normal. Look for four `Transaction hash is …` / `Transaction is included in block N` pairs: three segments and the header. The hello-world call prints nothing, so step 5 is how you check it. To see only those, append `| grep -E 'Transaction (hash|is included)|rror|panicked'` inside the parentheses.
-
-On `dev` at `93af39c8b` the runner needs three fixes in `examples/program_deployment/` first (details in INTRO.md section 4, "Run it locally"):
-
-1. **Segment count** (`src/lib.rs`): count segments from `ProgramBinary::decode(&bytecode)?.user_elf`, not the whole `.bin`. Otherwise: `SegmentCountMismatch`.
-2. **Fee:** build the call with `Message::try_new_with_fees(.., FeeDeclaration::new(payer, ..))`, include the payer's nonce, and sign with the payer. Otherwise: `MissingFeeDeclaration`.
-3. **Admission:** add `PublicAccountEvidence::Key(..)` for `ACCOUNT` to `admission_evidence`, or use an account already on chain. Otherwise: `UnadmittedPublicActor`.
-
-Fixes 2 and 3 fail silently: the runner doesn't check the call's result.
-
-## 5. Check the result
+The program loader stores a program as a header account (its address) and one segment account per 96 KiB of its user ELF. `token.bin` needs 2.
 
 ```bash
-just run-wallet account get --scope all --account-id "Public/$ACCOUNT"        # decoded
-just run-wallet account get --raw --scope all --account-id "Public/$ACCOUNT"  # hex under actor_states
-echo <hex> | xxd -r -p                                                        # -> Hola mundo!
-
-# "Account is Uninitialized" means the call reverted. Confirm on the sequencer:
-curl -s -X POST http://127.0.0.1:3040 -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"getAccount","params":["'$ACCOUNT'"]}'   # null: never written
-```
-
-## Optional: deploy without the runner
-
-```bash
-just run-wallet account new public --label hdr      # header; its id becomes the program's address
-just run-wallet account new public --label seg0     # one segment account per 96 KiB chunk of the user ELF
-just run-wallet account new public --label seg1
-just run-wallet account new public --label seg2
-just run-wallet program-loader deploy --elf "$BIN/hello_world.bin" \
+$WALLET account new public --label hdr      # its id becomes the program's address
+$WALLET account new public --label seg0
+$WALLET account new public --label seg1
+$WALLET program-loader deploy --elf "$TOKEN_BIN" \
   --header Public/<hdr id> \
-  --segments Public/<seg0 id> Public/<seg1 id> Public/<seg2 id> \
+  --segments Public/<seg0 id> Public/<seg1 id> \
   --payer Public/$PAYER
+TOKEN=<hdr id>
 ```
 
-`hello_world.bin` needs exactly 3 segments. If a program needs a different number, the deploy stops before sending anything, with `Program bytecode splits into N segment(s) but M were supplied`. Create N segment accounts and run it again. It prints the same large transaction dump as the runner, and on success ends with `Program deployed. Header account id: <hdr id>`.
+**Expect a lot of output.** The deploy prints every transaction in full, including the program bytes in each segment upload, and that's normal. On success it ends with `Program deployed. Header account id: <hdr id>`. With the wrong number of segments it stops before sending anything, with `Program bytecode splits into N segment(s) but M were supplied`. Create N segment accounts and run it again.
+
+## 5. Create a token
+
+A token's definition lives on an account of its own, which signs for it. The whole supply goes to `ACCOUNT`'s holding, which signs too.
+
+```bash
+$WALLET account new public --label jz-token
+$SPEL --idl "$TOKEN_IDL" --program "$TOKEN" --fee-payer "$PAYER" \
+  send --root jz-token --signer jz-token --signer "$ACCOUNT" --dry-run -- \
+  new-definition --name JZ --total-supply 1000 --mint-authority none --holding "$ACCOUNT"
+```
+
+The dry run prints the access list (each actor, and why it's there), who signs, and the encoded message, and sends nothing. Drop `--dry-run` to send. spel simulates the transaction first, and doesn't send one that would be refused. Once it's included, it prints each declared actor that changed:
+
+```
+Included in block 203. Changed:
+  (jz-token (7SDm…), 3Yk4…)
+    before: none
+    after:  {"Definition":{"authority":null,"name":"JZ","total_supply":"1000"}}
+  (account (qJxT…), 3Yk4…)
+    before: none
+    after:  {"Holding":{"balance":"1000","definition_id":"7SDm…"}}
+```
+
+## 6. Check the result
+
+```bash
+$SPEL --idl "$TOKEN_IDL" --program "$TOKEN" inspect "$ACCOUNT"     # {"Holding": {"balance": "1000", …}}
+$WALLET account get --raw --scope all --account-id "Public/$ACCOUNT"   # the raw actor states
+```
+
+Then move some. The recipient needs a holding of this token first:
+
+```bash
+$WALLET account new public --label bob
+$SPEL --idl "$TOKEN_IDL" --program "$TOKEN" --fee-payer "$PAYER" \
+  send --root bob --signer bob -- initialize-holding --definition jz-token
+$SPEL --idl "$TOKEN_IDL" --program "$TOKEN" --fee-payer "$PAYER" \
+  send --root "$ACCOUNT" --signer "$ACCOUNT" -- transfer --to bob --amount 300
+```
+
+A transfer to an account with no holding, or of more than the balance, is refused in simulation: spel prints the guest's panic (`recipient has no token holding; initialize it first`, `insufficient balance`), sends nothing, and exits with 2. lez-programs' [token runbook](https://github.com/logos-blockchain/lez-programs/blob/main/docs/token/README.md) covers every token message.
+
+## Your own guests
+
+`jz-progs/example_progs/*.rs` build in a guest package prog-tui keeps in lez-programs, `lez-programs/jz/` (from `prog-tui/templates/jz/`). prog-tui's `b` writes it, links each file in as `jz/methods/guest/src/bin/jz_<name>.rs`, and builds it. By hand, once prog-tui has written it:
+
+```bash
+(cd ../lez-programs && cargo build --release --manifest-path jz/methods/Cargo.toml --target-dir target)
+JZ_BIN=$PWD/../lez-programs/target/riscv-guest/jz-methods/jz-guest/riscv32im-risc0-zkvm-elf/release
+```
+
+Deploy `$JZ_BIN/jz_<name>.bin` as in step 4 (each needs 2 segments today), then call it with spel, like token. `b` also writes each guest's spel IDL to `lez-programs/jz/idl/jz_<name>.json`, with `spel generate-idl` over a one-file crate that links to the guest:
+
+```bash
+IDL=$PWD/../lez-programs/jz/idl/jz_hello_world.json
+$SPEL --idl "$IDL" --program <jz_hello_world hdr id> --fee-payer "$PAYER" \
+  send --root "$ACCOUNT" --signer "$ACCOUNT" -- hello --greeting 'Hola mundo!'
+```
+
+[prog-tui/README.md](../prog-tui/README.md), "Calling with spel", lists what each guest's calls take: which actors to add for admin_seat's PDA, simple_token's treasury, and the clock clock_gate reads.

@@ -1,7 +1,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use lee_core::{
     account::{AccountId, Actor},
-    program::{PdaSeed, ReceiveInput, Response, write_once},
+    program::{PdaSeed, ReceiveInput, Response, SyncMessage, write_once},
 };
 
 // Simple token: a fixed-supply token, minted and burned by one admin, transferred by holders.
@@ -27,11 +27,15 @@ use lee_core::{
 //   `Return` to the treasury. (Burning someone else's tokens isn't allowed: they transfer to the
 //   admin first.)
 // - `Transfer { to, amount }`, to a holder, signed by them: debits them and sends `Credit` to `to`.
-// - `Credit(amount)`: only this program can send it, only from a mint or a transfer.
+// - `Credit { amount }`: only this program can send it, only from a mint or a transfer.
 //
-// To call `Open` and `Mint`, the transaction must declare the seat and the treasury (and, for
-// `Mint`, the recipient), and carry `PublicAccountEvidence::Pda { program, seed }` for the
-// treasury while it isn't on chain yet.
+// **The seed grant.** Every message from the seat to the treasury carries the treasury's seed
+// (`SyncMessage::with_pda_seeds`), so the engine admits the treasury with no
+// `PublicAccountEvidence`, even before it's on chain. To call `Open`, `Mint` or `Burn`, the
+// transaction only has to declare the seat (the root) and the treasury (in prog-tui,
+// `pda:<admin>` in `actors`), and for `Mint` the recipient (an account field, which spel declares
+// by itself). A recipient that isn't on chain yet still needs admitting: the wallet does that with
+// key evidence when it holds the recipient's key, and otherwise it must sign.
 //
 // prog-tui builds it as the guest `jz_simple_token` (key u, or b for every file here).
 
@@ -52,7 +56,7 @@ enum Message {
     /// To a holder, signed by them.
     Transfer { to: AccountId, amount: u128 },
     /// Holder or treasury to a holder.
-    Credit(u128),
+    Credit { amount: u128 },
 }
 
 #[derive(BorshSerialize, BorshDeserialize)]
@@ -74,8 +78,7 @@ fn handle_message(input: &ReceiveInput, message: Message) -> Response {
     match message {
         Message::Open { total_supply } => {
             assert_admin_call(input);
-            let treasury = Actor::new(treasury_of(&program, input.receiver.account_id), program);
-            Response::keep_state().send_sync(treasury, &Message::Init { total_supply })
+            Response::keep_state().send(to_treasury(input, &Message::Init { total_supply }))
         }
         Message::Init { total_supply } => {
             assert_from_own_seat(input);
@@ -90,8 +93,7 @@ fn handle_message(input: &ReceiveInput, message: Message) -> Response {
         }
         Message::Mint { to, amount } => {
             assert_admin_call(input);
-            let treasury = Actor::new(treasury_of(&program, input.receiver.account_id), program);
-            Response::keep_state().send_sync(treasury, &Message::Draw { to, amount })
+            Response::keep_state().send(to_treasury(input, &Message::Draw { to, amount }))
         }
         Message::Draw { to, amount } => {
             assert_from_own_seat(input);
@@ -101,16 +103,15 @@ fn handle_message(input: &ReceiveInput, message: Message) -> Response {
                 .checked_sub(amount)
                 .expect("mint exceeds the unissued supply");
             Response::set_state(borsh::to_vec(&treasury).unwrap())
-                .send_async(Actor::new(to, program), &Message::Credit(amount))
+                .send_async(Actor::new(to, program), &Message::Credit { amount })
         }
         Message::Burn { amount } => {
             assert_admin_call(input);
-            let treasury = Actor::new(treasury_of(&program, input.receiver.account_id), program);
             let post = decode_balance(&input.pre_state)
                 .checked_sub(amount)
                 .expect("burn exceeds the admin's balance");
             Response::set_state(encode_balance(post))
-                .send_sync(treasury, &Message::Return { amount })
+                .send(to_treasury(input, &Message::Return { amount }))
         }
         Message::Return { amount } => {
             assert_from_own_seat(input);
@@ -131,9 +132,9 @@ fn handle_message(input: &ReceiveInput, message: Message) -> Response {
                 .checked_sub(amount)
                 .expect("transfer exceeds the balance");
             Response::set_state(encode_balance(post))
-                .send_async(Actor::new(to, program), &Message::Credit(amount))
+                .send_async(Actor::new(to, program), &Message::Credit { amount })
         }
-        Message::Credit(amount) => {
+        Message::Credit { amount } => {
             assert!(
                 input.from_own_program(),
                 "a credit comes from this program's mint or transfer"
@@ -185,14 +186,27 @@ fn decode_balance(data: &[u8]) -> BalanceState {
     u128::from_le_bytes(data.try_into().expect("a balance is 16 bytes"))
 }
 
+/// The seat's `message` to its treasury, granting the treasury's seed so it's admitted.
+fn to_treasury(input: &ReceiveInput, message: &Message) -> SyncMessage {
+    let program = input.receiver.program_account_id;
+    let admin = input.receiver.account_id;
+    SyncMessage::new(Actor::new(treasury_of(&program, admin), program), message)
+        .with_pda_seeds([seed_of(admin)])
+}
+
+/// The seed of `admin`'s treasury: their account id.
+fn seed_of(admin: AccountId) -> PdaSeed {
+    PdaSeed::new(*admin.value())
+}
+
 /// The treasury PDA of `admin`'s token.
 fn treasury_of(program: &AccountId, admin: AccountId) -> AccountId {
-    AccountId::for_public_pda(program, &PdaSeed::new(*admin.value()))
+    AccountId::for_public_pda(program, &seed_of(admin))
 }
 
 #[cfg(test)]
 mod tests {
-    use lee_core::program::{AsyncMessage, SyncMessage};
+    use lee_core::program::AsyncMessage;
 
     use super::*;
 
@@ -206,6 +220,11 @@ mod tests {
 
     fn treasury() -> Actor {
         actor(treasury_of(&PROGRAM, ADMIN))
+    }
+
+    /// The seat's message to the treasury, with the treasury's seed granted.
+    fn granted(message: &Message) -> SyncMessage {
+        SyncMessage::new(treasury(), message).with_pda_seeds([seed_of(ADMIN)])
     }
 
     fn treasury_state(total_supply: u128, unissued: u128) -> Vec<u8> {
@@ -247,7 +266,7 @@ mod tests {
         assert_eq!(open.post_state, None);
         assert_eq!(
             open.sync_messages,
-            [SyncMessage::new(treasury(), &Message::Init { total_supply: 100 })]
+            [granted(&Message::Init { total_supply: 100 })]
         );
 
         let init = handle_message(
@@ -289,7 +308,7 @@ mod tests {
         let mint = handle_message(&signed_to_seat(0), Message::Mint { to: ALICE, amount: 30 });
         assert_eq!(
             mint.sync_messages,
-            [SyncMessage::new(treasury(), &Message::Draw { to: ALICE, amount: 30 })]
+            [granted(&Message::Draw { to: ALICE, amount: 30 })]
         );
 
         let draw = handle_message(
@@ -299,7 +318,7 @@ mod tests {
         assert_eq!(draw.post_state, Some(treasury_state(100, 70).into()));
         assert_eq!(
             draw.async_messages,
-            [AsyncMessage::new(actor(ALICE), &Message::Credit(30))]
+            [AsyncMessage::new(actor(ALICE), &Message::Credit { amount: 30 })]
         );
     }
 
@@ -327,7 +346,7 @@ mod tests {
         assert_eq!(burn.post_state, Some(encode_balance(30).into()));
         assert_eq!(
             burn.sync_messages,
-            [SyncMessage::new(treasury(), &Message::Return { amount: 20 })]
+            [granted(&Message::Return { amount: 20 })]
         );
 
         let ret = handle_message(
@@ -352,12 +371,12 @@ mod tests {
         assert_eq!(transfer.post_state, Some(encode_balance(20).into()));
         assert_eq!(
             transfer.async_messages,
-            [AsyncMessage::new(actor(ADMIN), &Message::Credit(10))]
+            [AsyncMessage::new(actor(ADMIN), &Message::Credit { amount: 10 })]
         );
 
         let credit = handle_message(
             &input(actor(ADMIN), Some(actor(ALICE)), false, encode_balance(5)),
-            Message::Credit(10),
+            Message::Credit { amount: 10 },
         );
         assert_eq!(credit.post_state, Some(encode_balance(15).into()));
     }
@@ -394,7 +413,7 @@ mod tests {
     fn a_credit_from_a_transaction_is_refused() {
         let _response = handle_message(
             &input(actor(ALICE), None, true, Vec::new()),
-            Message::Credit(1_000),
+            Message::Credit { amount: 1_000 },
         );
     }
 
@@ -408,7 +427,7 @@ mod tests {
                 false,
                 Vec::new(),
             ),
-            Message::Credit(1_000),
+            Message::Credit { amount: 1_000 },
         );
     }
 }

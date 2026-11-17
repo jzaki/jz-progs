@@ -1,9 +1,10 @@
 //! Your own guest programs, in `jz-progs/example_progs/`.
 //!
-//! They build with LEZ's own example guest package, so they get its dependencies (`lee_core`,
-//! `borsh`, `risc0-zkvm`), lockfile and toolchain with nothing new to install. Each
+//! They build in the `jz/` guest package prog-tui keeps in the lez-programs checkout
+//! ([`crate::programs`]), against the same LEZ tag as lez-programs' own programs. Its
+//! dependencies are `lee_core`, `clock_core`, `borsh` and `risc0-zkvm`. Each
 //! `example_progs/<name>.rs` is symlinked into that package's `src/bin/` as `jz_<name>.rs`, which
-//! makes it a guest named `jz_<name>`. The links are untracked files in the LEZ checkout.
+//! makes it a guest named `jz_<name>`. `jz/` is untracked in lez-programs.
 
 use std::{
     fs, io,
@@ -74,7 +75,7 @@ pub fn link(file: &Path, guest_src: &Path) -> anyhow::Result<(String, Linked)> {
             Linked::Replaced
         }
         Ok(_) => bail!(
-            "{} is a regular file in LEZ, not a link prog-tui made; not touching it",
+            "{} is a regular file, not a link prog-tui made; not touching it",
             dest.display()
         ),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Linked::Created,
@@ -159,10 +160,10 @@ mod tests {
         assert_eq!(fs::read_to_string(bin.join("jz_hello.rs")).unwrap(), "// other");
 
         // A regular file with that name is never touched.
-        fs::write(bin.join("jz_real.rs"), "// LEZ's").unwrap();
+        fs::write(bin.join("jz_real.rs"), "// someone's").unwrap();
         fs::write(progs.join("real.rs"), "// mine").unwrap();
         assert!(link(&progs.join("real.rs"), &bin).is_err());
-        assert_eq!(fs::read_to_string(bin.join("jz_real.rs")).unwrap(), "// LEZ's");
+        assert_eq!(fs::read_to_string(bin.join("jz_real.rs")).unwrap(), "// someone's");
 
         assert!(link(&progs.join("missing.rs"), &bin).is_err());
         let _ = fs::remove_dir_all(&dir);

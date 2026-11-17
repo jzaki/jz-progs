@@ -72,18 +72,6 @@ pub fn parse_json_line(output: &str, prefix: &str) -> Option<serde_json::Value> 
         .and_then(|json| serde_json::from_str(json).ok())
 }
 
-/// Every program id a runner deployed, in order, from its `Deployed Program with {"program_id":…}` lines
-/// (`program_deployment::deploy_program` prints them). A runner that deploys two programs
-/// (caller, then callee) prints two.
-pub fn parse_program_ids(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .filter_map(|line| line.strip_prefix("Deployed Program with "))
-        .filter_map(|json| serde_json::from_str::<serde_json::Value>(json).ok())
-        .filter_map(|value| value["program_id"].as_str().map(str::to_owned))
-        .collect()
-}
-
 /// Cargo and build-script chatter that would bury the useful lines in the log pane.
 pub fn is_noise(line: &str) -> bool {
     // `lez-call --json`'s and `lez-dryrun --json`'s results: the job reads them and logs what
@@ -129,16 +117,6 @@ mod tests {
             parse_new_account(output).as_deref(),
             Some("5QBN968ZNHs7yh8usxr1Rbx1AAMtqyZ8wK2FdVk2EuHX")
         );
-    }
-
-    #[test]
-    fn parses_every_program_id_in_order() {
-        let output = "Deployed Program with {\"program_id\":\"CALLER\"}\n\
-                      Transaction hash is ab\n\
-                      Deployed Program with {\"program_id\":\"CALLEE\"}\n\
-                      Deployed Program with {\"tx\":\"x\",\"block\":3}\n";
-        assert_eq!(parse_program_ids(output), ["CALLER", "CALLEE"]);
-        assert!(parse_program_ids("nothing").is_empty());
     }
 
     #[test]

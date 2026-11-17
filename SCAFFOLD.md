@@ -334,7 +334,7 @@ Scaffold works around a program, not inside it. So the contrasts here are of the
 
 ### 4a. The first run
 
-The middle column is what scaffold runs at the v0.1.2 pin (*implied*, from the code). The right column is the by-hand path on `dev` (WALKTHROUGH.md).
+The middle column is what scaffold runs at the v0.1.2 pin (*implied*, from the code). The right column is the by-hand path on `dev` with LEZ's own example, as of 2026-11-11. jz-progs' current by-hand path builds lez-programs' token at `v0.4.0-rc3` and calls it with spel instead ([WALKTHROUGH.md](example_progs/WALKTHROUGH.md)): the build step becomes `cargo build --release -p token-methods` in lez-programs, and the call `spel send`, which also checks the result.
 
 | Step | With scaffold | What scaffold runs (v0.1.2) | By hand on `dev` |
 |---|---|---|---|
@@ -615,7 +615,7 @@ These are observations, not a design.
 1. **Which LEZ line does scaffold move to next?** PR #273 takes it to v0.3.1, which jz-progs advises against porting to. Under the one-release rule, scaffold would stay on v0.3 until another migration of the same size. Is the plan to merge PR #273 and then port to `dev`, or to go straight to v0.4 once it's tagged?
 2. **PR #199 or PR #273, on SPEL?** PR #199 makes SPEL the framework template on v0.2.4, and PR #273 removes it. A v0.4 SPEL needs one of the two routes back in (§5.3).
 3. **Which tool owns deploy?** `spel deploy` (SPEL.md §3.9), `lgs deploy` and LEZ's runners each create segment and header accounts. On v0.4, one of them should record the program id where the others can read it.
-4. **How is a v0.4 project's IDL built?** `spel generate-idl` from source, PR #199's route, avoids the duplicate host copy. A v0.4 program has one handler and one message type, which prog-tui already reads from the source by finding `actor_entrypoint!` ([prog-tui/README.md](prog-tui/README.md)). Does that make a source-read IDL enough?
+4. **How is a v0.4 project's IDL built?** `spel generate-idl` from source, PR #199's route, avoids the duplicate host copy. A v0.4 program has one handler and one message type. `lez-call` reads it from a single-file guest by finding `actor_entrypoint!`, but lez-programs' guests are `actor_entrypoint!(raw …)` over a message type in a separate `core` crate, which only a crate-level generator (spel's, or lez-programs' `idl-gen`) sees ([prog-tui/README.md](prog-tui/README.md)). Which of the two should a template assume?
 5. **How should scaffold report a reverted call on v0.4?** From the resulting state, from events, or from a receipt that LEZ would have to add?
 6. **Who admits accounts?** On `dev`, a public account that isn't on chain yet needs admission evidence. The templates and `wallet topup` must either supply it or create accounts that are already admitted.
-7. **Which LEZ ref should a v0.4 template pin?** `dev` moves and has no tag. Its runners work from PR #989 (`680eb56b3`) on.
+7. **Which LEZ ref should a v0.4 template pin?** There is now a pre-release tag, `v0.4.0-rc3`, which lez-programs and spel's `refactor/lez-v0.4.x` pin. LEZ's own runners need `dev` from PR #989 (`680eb56b3`) on, which is after the tag; lez-programs' programs and spel don't.

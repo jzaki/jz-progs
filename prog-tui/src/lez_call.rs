@@ -13,6 +13,7 @@ use serde::Deserialize;
 
 use crate::{
     lez::Lez,
+    programs::Programs,
     tools::{LEZ_CALL, LEZ_DRYRUN},
     wallet::parse_json_line,
 };
@@ -97,23 +98,25 @@ pub fn interface(lez: &Lez, password: &str, source: &Path) -> anyhow::Result<Int
     Ok(serde_json::from_value(value)?)
 }
 
-/// The guest a deployed program runs, by the image id in its header: `lez-dryrun source-of`.
-pub fn guest_of(lez: &Lez, program_id: &str) -> anyhow::Result<String> {
+/// The jz guest a deployed program runs, by the image id in its header: `lez-dryrun source-of`
+/// over the built jz guests.
+pub fn guest_of(lez: &Lez, programs: &Programs, program_id: &str) -> anyhow::Result<String> {
     let tool = LEZ_DRYRUN
         .path()
         .ok_or_else(|| anyhow::anyhow!("finding a deployment's guest needs lez-dryrun (key b)"))?;
     let output = Command::new(tool)
         .args(["--rpc", &lez.sequencer_url(), "source-of", program_id, "--bin-dir"])
-        .arg(lez.bin_dir())
+        .arg(programs.jz_bin_dir())
         .output()?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     anyhow::ensure!(output.status.success(), "{}", stderr.trim().trim_start_matches("Error: "));
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-/// The source of the guest named `guest`, in LEZ's guest package.
-pub fn source_of(lez: &Lez, guest: &str) -> PathBuf {
-    lez.guest_src_dir().join(format!("{guest}.rs"))
+/// The source of the jz guest named `guest`: its link in lez-programs' `jz/` package, so
+/// `lez-call` finds that package's manifest (and its dependencies) above it.
+pub fn source_of(programs: &Programs, guest: &str) -> PathBuf {
+    programs.jz_src_dir().join(format!("{guest}.rs"))
 }
 
 fn run(lez: &Lez, password: &str, args: &[&std::ffi::OsStr]) -> anyhow::Result<String> {

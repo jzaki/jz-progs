@@ -1,16 +1,18 @@
 # LEZ programs: build and run locally
 
-How to build, deploy and call a first LEZ program from the LEZ repo itself, on each program model. **Write new programs for v0.4, the actor model, which is how programs will be written: use section 4 and the `dev` branch.** Sections 2 and 3 cover the older tags: v0.2.4 is legacy, and v0.3.0 is the current testnet but very short-lived, so don't start on it. Use section 2 to maintain an existing program or to try a deployment on a public (legacy) testnet. Everything here uses the LEZ repo directly, with Nix and `just`. It needs no Docker or Bedrock: the sequencer's `standalone` feature mocks Bedrock, and the example guests build with the local RISC Zero toolchain instead of Docker.
+How to build, deploy and call a first LEZ program, on each program model. **Write new programs for v0.4, the actor model, which is how programs will be written: use section 4.** Section 4 builds lez-programs' programs against LEZ `v0.4.0-rc3` and calls them with spel. Sections 2 and 3 cover the older tags, from the LEZ repo itself: v0.2.4 is legacy, and v0.3.0 is the current testnet but very short-lived, so don't start on it. Use section 2 to maintain an existing program or to try a deployment on a public (legacy) testnet. Everything here uses the LEZ repo directly, with Nix and `just`. It needs no Docker or Bedrock: the sequencer's `standalone` feature mocks Bedrock, and the example guests build with the local RISC Zero toolchain instead of Docker.
 
 | Version | Status | Network | Program model | Section |
 |---|---|---|---|---|
-| LEZ **v0.4** (unreleased, on `dev`) | **Recommended.** How programs will be written | None yet (listed as TBD) | Actors handling messages | **4** |
+| LEZ **v0.4** (pre-release tag `v0.4.0-rc3`; `dev` moves on) | **Recommended.** How programs will be written | None yet (listed as TBD) | Actors handling messages | **4** |
 | LEZ **v0.3.0** | Current testnet, but very short-lived. Don't start on it | Local, and testnet 0.3 (experimental) | `plan`/`apply` on per-program shards, with fees | 3 |
 | LEZ **v0.2.4** | Legacy | Local, and the legacy testnet | Programs rewrite whole accounts and claim them | 2 |
 
 Sources:
 
-- `logos-blockchain/logos-execution-zone` on `dev` (checked at `680eb56b3`, 2026-11-11, which merges the runner fixes of PR #989) for v0.4, and tags **v0.2.4** and **v0.3.0** for the older sections. `../logos-execution-zone` is the local checkout. Files used: `Justfile`, `flake.nix`, `rust-toolchain.toml`, `examples/program_deployment/`, `lez/wallet/`, `lez/programs/`.
+- `logos-blockchain/logos-execution-zone` at tag **`v0.4.0-rc3`** (`bafd07be0`, 2026-11-11) for v0.4, and tags **v0.2.4** and **v0.3.0** for the older sections. `../logos-execution-zone` is the local checkout. Files used: `Justfile`, `flake.nix`, `rust-toolchain.toml`, `lez/wallet/`, `lez/programs/`, and `examples/program_deployment/` for sections 2 and 3. Some v0.4 notes below were first checked on `dev` at `680eb56b3`, and say so.
+- `logos-blockchain/lez-programs` at `dea23c2` (2026-11-16), which pins LEZ `v0.4.0-rc3` and spel `c90ca0b`: the token and nft programs, their spel IDLs (`artifacts/`), and the token runbook (`docs/token/README.md`). `../lez-programs` is the local checkout.
+- `logos-co/spel`, branch `refactor/lez-v0.4.x` at `c90ca0b` (2026-11-16): the `spel` CLI that deploys, calls and inspects programs from their IDLs. `../spel` is the local checkout.
 - `logos-co/logos-docs` [Journey] issues #506–#511 and #514, the LEZ developers' notes for testnet v0.3. Issue numbers like `#514` refer to these, and LEZ PRs are written "PR 875".
 - `logos-co/logos-docs` branch `docs/zone-endpoint-ref`, file `docs/get-started/testnet-endpoints.md` (commit `de03a2b0`, unmerged at the time of writing, so it may move): the RPC, explorer, release and channel for each testnet. Section 1 copies the rows used here. If they differ, that page wins.
 - The actor-model manual on LEZ branch `moudy/guide-mdbook-fixes` (`docs/actor-program-development-book/`; first written on `schouhy/lez-guide-mdbook`). Section 4 links to it instead of repeating it.
@@ -26,11 +28,11 @@ The debug sequencer config funds two accounts at genesis, and `just wallet-impor
 ```bash
 curl -L https://risczero.com/install | bash && rzup install   # guest toolchain; not in the Nix shell
 cd ../logos-execution-zone               # your LEZ checkout
-git checkout <ref>                       # dev for v0.4, or the tag v0.2.4 / v0.3.0
+git checkout <ref>                       # v0.4.0-rc3 for v0.4, or the tag v0.2.4 / v0.3.0
 nix develop                              # clang, libclang, openssl, pkg-config, pcsclite
 ```
 
-Run every command below inside `nix develop`, from the repo root unless a step says otherwise. Each ref pins its own Rust version: 1.94.0 for v0.2.4 and 1.98.1 for v0.3.0 and `dev`. If the Nix shell's `cargo` doesn't match, install the pinned version with `rustup` instead.
+Run every command below inside `nix develop`, from the repo root unless a step says otherwise. Each ref pins its own Rust version: 1.94.0 for v0.2.4 and 1.98.1 for v0.3.0 and v0.4.0-rc3. lez-programs pins 1.94.0 for its own builds. If the Nix shell's `cargo` doesn't match, install the pinned version with `rustup` instead.
 
 > **If the RocksDB build fails with `Unable to find libclang`,** point bindgen at the flake's libclang. This happens when a system LLVM is installed, because the dev shell doesn't set `LIBCLANG_PATH`. Run it in each `nix develop` shell before building:
 >
@@ -52,14 +54,14 @@ Both also appear on the Logos Blockchain explorer, `https://testnet.blockchain.l
 
 - **`change-network testnet` always means the 0.3 RPC.** The alias is hard-coded in `lez/wallet/src/cli/network.rs`, and it is the same at `v0.2.4`, `v0.3.0` and `dev`. For the legacy testnet, pass the URL: `wallet change-network https://testnet-legacy.lez.logos.co/`. `change-network` accepts `testnet`, `local` or any sequencer URL.
 - **`v0.2.4-lez-legacy` is not `v0.2.4`.** It is three commits ahead: built against logos-blockchain 0.3.1, plus a sequencer fix for stale pending inscriptions. Use the legacy tag for the legacy testnet.
-- **Keep one wallet home per network.** The wallet keeps its config and `storage.json` in `LEE_WALLET_HOME_DIR`. Reusing one home across networks mixes accounts and nonces from different chains. Copy `lez/wallet/configs/debug` to a new directory for each testnet, and export that path as `LEE_WALLET_HOME_DIR` in every terminal (the `run_*` runners read the same wallet). `just run-wallet` always sets the variable to `configs/debug` itself, so for a testnet either call `cargo run --release -p wallet --` directly, or accept that `configs/debug` is your home and reset it with `just clean` afterwards.
+- **Keep one wallet home per network.** The wallet keeps its config and `storage.json` in `LEE_WALLET_HOME_DIR`. Reusing one home across networks mixes accounts and nonces from different chains. Copy `lez/wallet/configs/debug` to a new directory for each testnet, and export that path as `LEE_WALLET_HOME_DIR` in every terminal (the runners and spel read the same wallet). `just run-wallet` always sets the variable to `configs/debug` itself, so for a testnet either call `cargo run --release -p wallet --` directly, or accept that `configs/debug` is your home and reset it with `just clean` afterwards.
 - **zsh users: `$WALLET` doesn't split.** Sections 2 and 3 set `WALLET="cargo run --release -p wallet --"` and then run `$WALLET ...`. That works in bash, and inside `nix develop`, which starts bash. zsh doesn't word-split an unquoted variable, so it fails with `command not found: cargo run --release -p wallet --`. In zsh, define a function instead, which works in bash too, and call `wallet ...` wherever the steps say `$WALLET ...`:
 
   ```bash
   wallet() { cargo run --release -p wallet -- "$@"; }
   ```
 
-All versions build the example guests the same way:
+Sections 2 and 3 build LEZ's example guests, the same way at both tags. Section 4 builds lez-programs' programs instead:
 
 ```bash
 cargo build --release -p example_program_deployment_methods
@@ -243,20 +245,20 @@ $WALLET account get --raw --scope all --account-id "Public/$ACCOUNT"   # shard h
 
 ---
 
-## 4. LEZ v0.4: the actor model on `dev` (local)
+## 4. LEZ v0.4: the actor model (local)
 
-> **Not released.** There is no v0.4 tag or testnet yet. The endpoints page lists 0.4 as TBD, so local is the only option for now. This is the actor model that PR #935 merged into LEZ `dev`, checked at `680eb56b3`. Build against `dev` and expect names to move. The steps below follow the code. The deploy and the hello-world call both work on `dev`, which has the example runner fixes since PR #989.
+> **Pre-release.** There is no v0.4 release or testnet yet: the endpoints page lists 0.4 as TBD, so local is the only option for now. This is the actor model that PR #935 merged into LEZ `dev`. The steps below use the pre-release tag **`v0.4.0-rc3`**, because that's what lez-programs and spel's `refactor/lez-v0.4.x` branch pin, and a wallet, a program and a chain must agree on the transaction format. `dev` has moved on since (69 commits as of 2026-11-17, `wallet program call` among them), so don't mix a `dev` checkout with these.
 
 **The idea.** A program no longer rewrites accounts or plans effects. It is a handler that receives **one message** addressed to **one actor**, and an actor is one program's state on one account. The handler sees only that state, and returns the new state plus any messages it wants to send to other actors.
 
 ```
 Account  (address + nonce)
- ├─ Actor (account, hello_world)  ─ state: "Hola mundo!"
+ ├─ Actor (account, token)        ─ state: {"Holding": {"balance": 700, …}}
  ├─ Actor (account, your program) ─ state: whatever it keeps
  └─ Actor (account, native token) ─ state: the balance
 ```
 
-**Hello world** (`examples/program_deployment/methods/guest/src/bin/hello_world.rs`):
+**Hello world** (LEZ's `examples/program_deployment/methods/guest/src/bin/hello_world.rs`; [example_progs/hello_world.rs](example_progs/hello_world.rs) adapts it, wrapping the message in an enum so spel can call it):
 
 ```rust
 use lee_core::program::{ReceiveInput, Response};
@@ -270,90 +272,95 @@ fn handle_message(input: &ReceiveInput, greeting: Vec<u8>) -> Response {
 }
 ```
 
-Hello world never checks `is_authorized`, so anyone can append to its state on any account. That is harmless: the program cannot touch the balance or any other program's state. `hello_world_with_authorization.rs` adds the check.
+Hello world never checks `is_authorized`, so anyone can append to its state on any account. That is harmless: the program cannot touch the balance or any other program's state.
 
-For what `ReceiveInput` and `Response` contain, and how sync and async messages differ, read the manual (`docs/actor-program-development-book/` on branch `moudy/guide-mdbook-fixes`): `foundations/messages.md` and `reference/api.md`. Its names are one rename behind `dev`: where it says `Call` and `Cast`, `dev` has `SyncMessage` and `AsyncMessage` ([the name map](GUIDE_v0.2_v0.4.md#read-this-next-to-the-actor-model-manual)). Its `foundations/toolchain.md` also covers testing a handler without a chain.
+**A real program** is laid out like lez-programs' token (`programs/token/`):
+- **`core/`:** the message enum (`Message`), the state type (`TokenState`, a `Definition` or a `Holding`) and the events. Clients depend on this crate, and the IDL is generated from it.
+- **The crate itself (`src/`):** `handle_message(input: &ReceiveInput) -> Response`. It decodes the message itself, so it can tell a client's `Message` from an `Internal` message its own actors send each other (`input.from_own_program()`). Each message has its own file (`transfer.rs`, `mint.rs`, …).
+- **`methods/guest/src/bin/token.rs`:** one line, `lee_core::actor_entrypoint!(raw token_program::handle_message);`. The `methods` crate around it builds the guest.
+
+For what `ReceiveInput` and `Response` contain, and how sync and async messages differ, read the manual (`docs/actor-program-development-book/` on LEZ branch `moudy/guide-mdbook-fixes`): `foundations/messages.md` and `reference/api.md`. Its names are one rename behind `dev`: where it says `Call` and `Cast`, `dev` has `SyncMessage` and `AsyncMessage` ([the name map](GUIDE_v0.2_v0.4.md#read-this-next-to-the-actor-model-manual)). Its `foundations/toolchain.md` also covers testing a handler without a chain.
 
 ### Run it locally
 
-Do section 1 first, with `git checkout dev` for the tag. The pinned Rust is 1.98.1.
+Do section 1 first, with `git checkout v0.4.0-rc3` for the ref. Check out lez-programs and spel's `refactor/lez-v0.4.x` branch next to it. [example_progs/WALKTHROUGH.md](example_progs/WALKTHROUGH.md) has every command in order, and [prog-tui](prog-tui/README.md)'s `W` runs them.
 
 ```bash
-# Terminal 1: local sequencer, listening on 127.0.0.1:3040 by default. Dev mode skips proving.
+# Terminal 1 (in logos-execution-zone): local sequencer, listening on 127.0.0.1:3040 by default.
+# Dev mode skips proving.
 RISC0_DEV_MODE=1 just run-sequencer-standalone
 
-# Terminal 2: wallet. `just run-wallet` keeps its home in lez/wallet/configs/debug.
-export LEE_WALLET_HOME_DIR=$PWD/lez/wallet/configs/debug   # the runner below reads the same wallet
-just run-wallet check-health             # first time: asks for a new password, twice (see below)
+# Terminal 2 (in logos-execution-zone): the wallet, the programs, and spel.
+cargo build --release -p wallet && WALLET=$PWD/target/release/wallet
+export LEE_WALLET_HOME_DIR=$PWD/lez/wallet/configs/debug   # just run-wallet's home; spel reads it too
+(cd ../lez-programs && cargo build --release -p token-methods -p nft-methods && make idl)
+(cd ../spel && cargo build --release --bin spel) && SPEL=$PWD/../spel/target/release/spel
+
+$WALLET check-health                     # first time: asks for a new password, twice (see below)
 just wallet-import-test-accounts         # imports and funds two test accounts; prints the list
 PAYER=<first account id listed above>
-just run-wallet account new public       # the account hello_world writes to
+$WALLET account new public --label account
 ACCOUNT=<account id printed above>
 ```
 
-**The wallet password encrypts the wallet's storage** (`storage.json`). It is no longer a key seed: the keys come from the mnemonic the wallet prints. Leave it empty to keep the storage unencrypted, as before. With a non-empty one, every later wallet command, runner and `lez-call` call asks for it on the terminal, or reads it from `LEE_WALLET_PASSWORD`. So for this walkthrough, either press Enter twice, or `export LEE_WALLET_PASSWORD=<password>` before `check-health` (then it doesn't ask at all). `wallet set-password` changes it later.
+**The guests build without Docker.** Building a program's `methods` crate (`token-methods`) builds its guest with the local RISC Zero toolchain, into `target/riscv-guest/token-methods/token-guest/riscv32im-risc0-zkvm-elf/release/token.bin`. lez-programs' `make build-programs` does the same in Docker, into `target/guest/`. `make idl` regenerates the spel IDLs in `artifacts/` from the `core` crates.
 
-Then build the guests (section 1) and run the hello-world runner. It deploys the program through the program loader, so there is no separate deploy step:
+**The wallet password encrypts the wallet's storage** (`storage.json`). It is no longer a key seed: the keys come from the mnemonic the wallet prints. Leave it empty to keep the storage unencrypted, as before. With a non-empty one, every later wallet command and `spel` call asks for it on the terminal, or reads it from `LEE_WALLET_PASSWORD`. So for this walkthrough, either press Enter twice, or `export LEE_WALLET_PASSWORD=<password>` before `check-health` (then it doesn't ask at all). `wallet set-password` changes it later.
 
-```bash
-(cd examples/program_deployment && \
-  cargo run --release --bin run_hello_world -- "$BIN/hello_world.bin" "$ACCOUNT" "$PAYER")
-```
-
-**Expect a lot of output.** The runner, like `wallet program-loader deploy`, prints every transaction in full, including the program bytes in each segment upload. That comes to about 1 MB of numbers in the terminal, and it's normal. The lines to look for are `Transaction hash is …` and `Transaction is included in block N`. For hello world there are four pairs, one per deploy transaction: three segments and the header. The call itself prints nothing. To see only those, pipe the output through `grep -E 'Transaction (hash|is included)|rror|panicked'`.
-
-> **Before PR #989 (`dev` at `93af39c8b`) this runner failed.** The deploy miscounted segments (`SegmentCountMismatch`), the call declared no fee (`MissingFeeDeclaration`), and a fresh `ACCOUNT` wasn't admitted, so the call reverted with `UnadmittedPublicActor`. PR #989 fixed all three on `dev`. If you see those errors, update your checkout.
->
-> - **Check the call yourself.** The runner doesn't check the call's result. A failed call still exits cleanly, so check the account (below).
-
-Check the result. `--scope all` asks the sequencer for the whole account (`getAccount`), with every program's actor state listed separately:
+**Deploy** token through the program loader. It stores a program as a header account, whose id is the program's address, and one segment account per 96 KiB of its user ELF:
 
 ```bash
-just run-wallet account get --scope all --account-id "Public/$ACCOUNT"        # decoded
-just run-wallet account get --raw --scope all --account-id "Public/$ACCOUNT"  # hex, under actor_states
-echo <hex> | xxd -r -p                                                        # -> Hola mundo!
+$WALLET account new public --label hdr
+$WALLET account new public --label seg0
+$WALLET account new public --label seg1
+$WALLET program-loader deploy --elf ../lez-programs/target/riscv-guest/token-methods/token-guest/riscv32im-risc0-zkvm-elf/release/token.bin \
+  --header Public/<hdr id> --segments Public/<seg0 id> Public/<seg1 id> --payer Public/$PAYER
+TOKEN=<hdr id>
 ```
 
-**"Account is Uninitialized" means the call reverted.** The wallet prints it when `getAccount` returns nothing, which means the account isn't on chain at all. Hello world never touches the balance, so a successful call is the only thing that creates `ACCOUNT`. A reverted call is still included and charged: the payer's nonce goes up, but nothing is written, and the wallet still says "included in block". With a runner from `dev` instead of the branch, the usual cause is that `ACCOUNT` wasn't admitted (`UnadmittedPublicActor`), then a missing fee. To confirm, query the sequencer directly:
-
-```bash
-curl -s -X POST http://127.0.0.1:3040 -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"getAccount","params":["'$ACCOUNT'"]}'   # null: never written
-```
-
-The revert reason appears only in the sequencer's log (Terminal 1).
-
-**Deploying without the runner:**
-
-```bash
-just run-wallet account new public --label hdr      # the header; its id becomes the program's address
-just run-wallet account new public --label seg0     # one segment account per 96 KiB chunk of the user ELF
-just run-wallet account new public --label seg1
-just run-wallet account new public --label seg2
-just run-wallet program-loader deploy --elf "$BIN/hello_world.bin" \
-  --header Public/<hdr id> \
-  --segments Public/<seg0 id> Public/<seg1 id> Public/<seg2 id> \
-  --payer Public/$PAYER
-```
-
-- **hello_world needs three segments.** The segment count is the size of the `.bin`'s `user_elf` divided by 96 KiB (`MAX_SEGMENT_DATA_LEN`), rounded up. It is not based on the whole `.bin`. `hello_world.bin` (305,616 bytes, tried on 2026-10-16) needs 3.
+- **token needs two segments.** The segment count is the size of the `.bin`'s `user_elf` divided by 96 KiB (`MAX_SEGMENT_DATA_LEN`), rounded up. It is not based on the whole `.bin`.
 - **The count must match exactly.** If it doesn't, the deploy fails before sending anything, with `Program bytecode splits into N segment(s) but M were supplied`. Create N segment accounts and run the deploy again, passing them in order.
-- **Done looks like** `Program deployed. Header account id: <hdr id>`.
+- **Expect a lot of output.** The deploy prints every transaction in full, including the program bytes in each segment upload. **Done looks like** `Program deployed. Header account id: <hdr id>`.
 - **A deploy that fails partway can't be resumed** over the same accounts. Create a fresh header and segments and deploy again.
+- `spel deploy <bin> --fee-payer <account>` does the same in one step, creating the header and segment accounts itself.
 
-The `--immutable` flag marks the program as immutable (not enforced by the protocol). The runner's `deploy_program` passes it, so a runner-deployed program is immutable. Run `wallet program-loader deploy --help` for the exact argument form. `examples/program_deployment/README.md` still says `wallet deploy-program`, which no longer exists.
+**Call it with spel.** spel encodes a message from the program's IDL, and works out the transaction's access list: the root actor, an actor on the program for each account field, and one for each signer. It never works out who signs: you say, with `--signer`. Create a token whose whole supply goes to `ACCOUNT`:
+
+```bash
+IDL=$PWD/../lez-programs/artifacts/token-idl.json
+$WALLET account new public --label jz-token        # the token's definition lives here
+$SPEL --idl "$IDL" --program "$TOKEN" --fee-payer "$PAYER" \
+  send --root jz-token --signer jz-token --signer "$ACCOUNT" -- \
+  new-definition --name JZ --total-supply 1000 --mint-authority none --holding "$ACCOUNT"
+```
+
+- **Plan first with `--dry-run`** (before the `--`). It prints the access list, each actor's reason, the signers and the encoded message, and sends nothing.
+- **Refusals cost nothing.** spel simulates the transaction before sending it, and doesn't send one the program or LEZ would refuse. It prints the guest's panic instead (`insufficient balance`) and exits with 2.
+- **It checks the result.** Once the transaction is included, spel prints each declared actor that changed, before and after. A transaction that's included but changes nothing (a no-op, or a refusal the simulation didn't foresee) also exits with 2. The revert reason then appears only in the sequencer's log (Terminal 1).
+
+Check the result:
+
+```bash
+$SPEL --idl "$IDL" --program "$TOKEN" inspect "$ACCOUNT"     # {"Holding": {"balance": "1000", "definition_id": …}}
+$WALLET account get --raw --scope all --account-id "Public/$ACCOUNT"   # every program's actor state, as hex
+```
+
+lez-programs' token runbook (`docs/token/README.md`) covers every message: who must sign each one, and which actors a message reaches through state rather than its fields (declare those with `--actor`). Before a transfer, the recipient needs a holding of the token: `initialize-holding --definition <definition>`, sent to the recipient and signed by it.
 
 **Reset:** stop the sequencer and run `just clean`.
 
 ### Your own program
 
-Every file in the guest's `src/bin/` becomes a program, and every file in the runner's `src/bin/` becomes a runner, so neither needs a manifest change.
+Two ways, depending on how big it is.
 
-1. **Copy the program.** Copy `hello_world.rs` (or `hello_world_with_move_function.rs`, for several message types) to `my_program.rs` in the same folder.
-2. **Define the message.** Use a borsh `enum Message` with one variant per operation. Guard any variant meant only for your own program with `input.from_own_program()`.
-3. **Copy a runner.** Copy `run_hello_world.rs` to `run_my_program.rs`, then change it to send the message you defined. It already declares the fee and admits `ACCOUNT`.
-4. **Rebuild and deploy.** A code change gives the program a new image ID. Redeploy to a new header, or update the existing one with `wallet program-loader update`.
-5. **Test the handler without a chain.** Build a `ReceiveInput` by hand and call the handler. The manual's `foundations/toolchain.md` shows how, and `lez/programs/clock/src/main.rs` has a worked example.
+**A lez-programs-style program** (the way to write one to keep):
+1. **Copy a program.** Copy `programs/token/` (with its `core/` and `methods/`) and rename the crates. Add `programs/<name>/core`, `programs/<name>` and `programs/<name>/methods` to the workspace `members`, and its guest to `exclude`.
+2. **Define the messages** in `core/`: a borsh `enum Message` with one variant per operation and a doc comment on each, which ends up in the IDL. Keep messages between your own actors in a separate enum, and check `input.from_own_program()` for them.
+3. **Build and generate its IDL:** `cargo build --release -p <name>-methods`, then `cargo run -p idl-gen -- programs/<name>/core --message Message --state <StateType> --events event > artifacts/<name>-idl.json` (or add it to `IDL_PROGRAMS` in the Makefile).
+4. **Deploy and call it** as above, with its own `.bin` and IDL. A code change gives the program a new image ID: redeploy to a new header, or update the existing one with `wallet program-loader update`.
+5. **Test the handler without a chain.** lez-programs tests every program that way (`RISC0_DEV_MODE=1 cargo test -p token_program`), and `programs/integration_tests` runs them together.
+
+**A single-file guest** (to try something quickly): put it in [jz-progs/example_progs/](example_progs) and press `u` in [prog-tui](prog-tui/README.md). prog-tui builds it as `jz_<name>` in a guest package it keeps in the lez-programs checkout (`lez-programs/jz/`), deploys it, and generates its spel IDL, so it's called with spel like token. For that, its message must be an `enum Message` with named fields, and text a `String` ([prog-tui/README.md](prog-tui/README.md), "Your own programs"). The five in `example_progs` show the patterns: a seat that speaks for its owner's PDA, granting the PDA's seed (`admin_seat`, `simple_token`), and reading the clock through its reply (`clock_gate`).
 
 What to design around, such as authorization, who sent a message, stored messages and replies, is in the manual's Part I. If you are porting a v0.2 program, use [GUIDE_v0.2_v0.4.md](GUIDE_v0.2_v0.4.md).
 
@@ -387,9 +394,20 @@ Whether a message to an actor runs now or is stored for later depends on whether
 
 ## 5. Example programs to read
 
-### Tutorial examples: `examples/program_deployment/` (on `dev`: v0.4)
+### lez-programs: `programs/`
 
-These are meant to be read and copied. Guests are in `methods/guest/src/bin/`, and runners are in `src/bin/run_*.rs`. All of them use `actor_entrypoint!`.
+Programs to build on, written for v0.4 and pinned to `v0.4.0-rc3`. Each has a `core/` crate (messages, state, events: the IDL's source), the program crate (`handle_message`, one file per message, with unit tests), and `methods/` (the one-line guest). The spel IDLs are in `artifacts/`, and `programs/integration_tests/` runs the programs together.
+
+| Program | What it shows |
+|---|---|
+| `token` | Fungible tokens: a definition on one account, a holding per account. A transfer debits the sender and sends the recipient an internal message, so it's the model for messages between a program's own actors. `docs/token/README.md` is a spel runbook for every message |
+| `nft` | Non-fungible tokens, the same shape as token (`docs/nft/README.md`) |
+
+The AMM, ATA, stablecoin, TWAP oracle and token-mint-authority programs are in the repo but not yet ported to the actor model: they're commented out of the workspace.
+
+### LEZ's tutorial examples: `examples/program_deployment/`
+
+These are meant to be read: small, one file each. Guests are in `methods/guest/src/bin/`, and runners are in `src/bin/run_*.rs`. All of them use `actor_entrypoint!`. The runners need LEZ `dev` (they send calls with the fee and admission fixes of PR #989), and nothing in jz-progs builds them any more.
 
 | Program | What it shows | Runner(s) |
 |---|---|---|
@@ -411,7 +429,7 @@ Production programs, deployed at genesis. Prebuilt binaries are committed in `ar
 
 | Program | Purpose |
 |---|---|
-| `clock` | Block ID and timestamp accounts. Other programs *assert* about them with `AssertTimestamp`. The best example of handler unit tests |
+| `clock` | Block ID and timestamp accounts. Other programs read them with `ReadBlockId` / `ReadTimestamp`, and the clock replies with the value rounded down to a granularity (so a raw reader: `actor_entrypoint!(raw …)`). Its `AssertTimestamp` messages were removed in `503115c2d` (2026-11-10). The best example of handler unit tests |
 | `fee` | Fee market state and distribution. Uses the read/reply pattern against the native token |
 | `bridge`, `bridge_lock`, `wrapped_token` | Bridging assets to and from Logos Blockchain. `bridge` is the model for custody from a PDA and for exactly-once receipts |
 | `cross_zone_inbox`, `cross_zone_outbox`, `cross_zone_marker` | Cross-zone messaging |

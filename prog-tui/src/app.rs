@@ -13,13 +13,15 @@ use tokio::{runtime::Handle, sync::mpsc::UnboundedSender};
 
 use crate::{
     builtin::{self, Builtin},
-    jobs::{self, CallRequest, Ctx, Msg, PlannedCall, Status, StepState},
+    jobs::{self, CallRequest, Ctx, Msg, Planned, Status, StepState},
     lez::Lez,
     lez_call::{self, Method, Seed},
-    tools::LEZ_CALL,
+    programs::{Guest, Programs},
     rpc::{AccountView, Rpc},
     sequencer::{self, StopTarget},
-    state::{self, Deployment, Saved, Watched},
+    spel::{self, SpelCall},
+    state::{self, Deployment, Origin, Saved, Watched},
+    tools::{LEZ_CALL, SPEL},
     userprogs,
     wallet::WalletAccount,
 };
@@ -64,7 +66,8 @@ pub enum FormAction {
     Transfer,
     /// Build and deploy a guest source file: field `file`.
     BuildDeploy,
-    LezDir,
+    /// The checkouts: fields `LEZ`, `lez-programs`.
+    Dirs,
     /// Watch an account outside the wallet: fields `id`, `note`.
     Watch,
     /// Plan one message: fields `to`, one per param, then `sign`, `actors` and `pda seeds`.
@@ -77,6 +80,14 @@ pub enum FormAction {
         /// The guest's source, for `lez-call`.
         source: PathBuf,
         seeds: Vec<Seed>,
+    },
+    /// Plan one message of a lez-programs program with `spel send --dry-run`: fields `to`, one
+    /// per IDL field, then `signers` and `actors`.
+    SpelPlan {
+        program_id: String,
+        name: String,
+        method: Method,
+        idl: PathBuf,
     },
 }
 
@@ -97,13 +108,20 @@ pub enum PickAction {
         /// The source's `PdaSeed` constants.
         seeds: Vec<Seed>,
     },
+    /// Ask for this message's fields (from the program's spel IDL), then plan it with spel.
+    SpelMethod {
+        deployment: Deployment,
+        method: Method,
+        idl: PathBuf,
+    },
 }
 
-/// A call's plan on screen: Enter sends it with `wallet program call`, when it can be sent.
+/// A call's plan on screen: Enter sends it (`wallet program call` or `spel send`), when it can be
+/// sent.
 pub struct PlanView {
     pub title: String,
     pub lines: Vec<String>,
-    pub call: Option<PlannedCall>,
+    pub call: Option<Planned>,
     /// The first line shown. The drawing clamps it to what fits, so it's a `Cell`.
     pub scroll: Cell<u16>,
 }
@@ -140,11 +158,16 @@ pub struct App {
     pub state_dir: PathBuf,
     pub saved: Saved,
     pub lez: Lez,
+    pub programs: Programs,
     pub rpc: Rpc,
     pub status: Status,
     pub accounts: Vec<WalletAccount>,
     pub views: BTreeMap<String, Option<AccountView>>,
-    pub guests: Vec<String>,
+    pub guests: Vec<Guest>,
+    /// Actor states decoded through their spel IDLs, by `(account, program, bytes)`. Showing these
+    /// in the Account pane instead of the raw bytes.
+    pub decoded: BTreeMap<(String, String, Vec<u8>), String>,
+    decoding: std::collections::BTreeSet<(String, String, Vec<u8>)>,
     pub focus: Focus,
     pub selected_account: usize,
     pub selected_guest: usize,
@@ -177,7 +200,8 @@ impl App {
         let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let state_dir = crate_dir.join(".state");
         let saved = Saved::load(&state_dir);
-        let lez = Lez::new(state::resolve_lez_dir(&crate_dir, &saved.lez_dir));
+        let lez = Lez::new(state::resolve_dir(&crate_dir, &saved.lez_dir));
+        let programs = Programs::new(state::resolve_dir(&crate_dir, &saved.programs_dir));
         let rpc = Rpc::new(lez.sequencer_url());
         let mut app = Self {
             rt,
@@ -186,11 +210,14 @@ impl App {
             state_dir,
             saved,
             lez,
+            programs,
             rpc,
             status: Status::default(),
             accounts: Vec::new(),
             views: BTreeMap::new(),
             guests: Vec::new(),
+            decoded: BTreeMap::new(),
+            decoding: std::collections::BTreeSet::new(),
             focus: Focus::Accounts,
             selected_account: 0,
             selected_guest: 0,
@@ -209,11 +236,12 @@ impl App {
             last_accounts: None,
             last_views: None,
         };
-        app.guests = app.lez.guests();
+        app.guests = app.programs.guests();
         app.save();
         app.push_log(format!(
-            "prog-tui · LEZ at {} · press ? for keys",
-            app.lez.dir.display()
+            "prog-tui · LEZ at {} · lez-programs at {} · press ? for keys",
+            app.lez.dir.display(),
+            app.programs.dir.display()
         ));
         app.push_log(format!(
             "env vars for your shell: source {}",
@@ -223,7 +251,7 @@ impl App {
     }
 
     fn save(&mut self) {
-        if let Err(error) = self.saved.save(&self.state_dir, &self.lez) {
+        if let Err(error) = self.saved.save(&self.state_dir, &self.lez, &self.programs) {
             self.push_log(format!("✗ couldn't save state: {error:#}"));
         }
     }
@@ -312,15 +340,16 @@ impl App {
         if !self.refreshing.status && due(self.last_status, 2) {
             self.refreshing.status = true;
             self.last_status = Some(Instant::now());
-            self.guests = self.lez.guests();
-            let (lez, state_dir, rpc, tx) = (
+            self.guests = self.programs.guests();
+            let (lez, programs, state_dir, rpc, tx) = (
                 self.lez.clone(),
+                self.programs.clone(),
                 self.state_dir.clone(),
                 self.rpc.clone(),
                 self.tx.clone(),
             );
             self.rt.spawn(async move {
-                let status = jobs::gather_status(lez, state_dir, rpc).await;
+                let status = jobs::gather_status(lez, programs, state_dir, rpc).await;
                 let _ = tx.send(Msg::Status(status));
             });
         }
@@ -347,6 +376,8 @@ impl App {
             });
         }
 
+        self.decode_selected();
+
         if self.status.seq.healthy && !self.refreshing.views && due(self.last_views, 3) {
             self.refreshing.views = true;
             self.last_views = Some(Instant::now());
@@ -372,6 +403,53 @@ impl App {
                 let views = jobs::fetch_views(&rpc, ids).await;
                 let _ = tx.send(Msg::Views(views));
             });
+        }
+    }
+
+    /// Decodes the selected account's actor states that have a spel IDL, one at a time and only
+    /// between jobs (spel opens the wallet, which a running job may be writing). Each result is
+    /// cached by the state's bytes, so a changed state is decoded again and an unchanged one never.
+    fn decode_selected(&mut self) {
+        if self.busy.is_some() || !self.status.seq.healthy || !self.decoding.is_empty() {
+            return;
+        }
+        let id = match self.selected_row() {
+            Some(AccountRow::Wallet(account)) if account.public => account.id.clone(),
+            Some(AccountRow::Watched(watched)) => watched.id.clone(),
+            _ => return,
+        };
+        let Some(Some(view)) = self.views.get(&id) else {
+            return;
+        };
+        for (program, bytes) in &view.actor_states {
+            let key = (id.clone(), program.clone(), bytes.clone());
+            if bytes.is_empty() || self.decoded.contains_key(&key) {
+                continue;
+            }
+            let Some(deployment) = self
+                .saved
+                .deployments
+                .iter()
+                .find(|d| d.program_id == *program && !d.stale)
+            else {
+                continue;
+            };
+            let Some(idl) = self.spel_idl(&deployment.name, &deployment.origin).filter(|idl| idl.is_file()) else {
+                continue;
+            };
+            self.decoding.insert(key.clone());
+            let (lez, tx, password, program) = (
+                self.lez.clone(),
+                self.tx.clone(),
+                self.saved.wallet_password.clone(),
+                program.clone(),
+            );
+            self.rt.spawn(async move {
+                let text = jobs::spel_decode(&lez, &password, &idl, &program, &key.0).await;
+                // A state spel can't decode is remembered as such, so it isn't tried again.
+                let _ = tx.send(Msg::Decoded(key, text.unwrap_or_default()));
+            });
+            return;
         }
     }
 
@@ -423,6 +501,10 @@ impl App {
                 }
                 self.clamp_selection();
             }
+            Msg::Decoded(key, text) => {
+                self.decoding.remove(&key);
+                self.decoded.insert(key, text);
+            }
             Msg::SetPayer(id) => {
                 self.saved.payer = Some(id);
                 self.save();
@@ -453,6 +535,7 @@ impl App {
             }
             Msg::ChainReset => {
                 self.saved.clear_chain();
+                self.decoded.clear();
                 self.accounts.clear();
                 self.views.clear();
                 self.selected_account = 0;
@@ -509,6 +592,7 @@ impl App {
         let ctx = Ctx::new(
             self.tx.clone(),
             self.lez.clone(),
+            self.programs.clone(),
             self.state_dir.clone(),
             self.rpc.clone(),
             self.saved.wallet_password.clone(),
@@ -551,8 +635,23 @@ impl App {
             self.push_log("✗ lez-call isn't built yet (key b)".to_owned());
         } else {
             self.push_log(format!(
-                "✗ no lez-call: check it out at {} or put it on PATH; key r runs the stock runners",
+                "✗ no lez-call: check it out at {} or put it on PATH",
                 LEZ_CALL.checkout().display()
+            ));
+        }
+        false
+    }
+
+    fn spel_ready(&mut self) -> bool {
+        if SPEL.path().is_some() {
+            return true;
+        }
+        if SPEL.has_checkout() {
+            self.push_log("✗ spel isn't built yet (key b)".to_owned());
+        } else {
+            self.push_log(format!(
+                "✗ no spel: check out its refactor/lez-v0.4.x branch at {} or put it on PATH",
+                SPEL.checkout().display()
             ));
         }
         false
@@ -592,8 +691,11 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => view.scroll.set(u16::MAX),
             KeyCode::Enter | KeyCode::Char('y') => {
                 if let Some(call) = view.call {
-                    self.spawn_job(&format!("call {}", call.name), move |mut ctx| async move {
-                        jobs::call(&mut ctx, &call).await
+                    self.spawn_job(&format!("call {}", call.name()), move |mut ctx| async move {
+                        match call {
+                            Planned::Wallet(call) => jobs::call(&mut ctx, &call).await,
+                            Planned::Spel(call) => jobs::spel_call(&mut ctx, &call).await,
+                        }
                     });
                 }
                 return;
@@ -624,6 +726,11 @@ impl App {
                             source,
                             seeds,
                         } => send_form(&self.saved, &deployment, method, single, source, seeds),
+                        PickAction::SpelMethod {
+                            deployment,
+                            method,
+                            idl,
+                        } => spel_form(&self.saved, &deployment, method, idl),
                     });
                 }
                 return;
@@ -635,7 +742,7 @@ impl App {
 
     fn on_main_key(&mut self, key: KeyEvent) {
         if self.focus == Focus::Builtin
-            && matches!(key.code, KeyCode::Char('d' | 'r' | 'c' | 'x'))
+            && matches!(key.code, KeyCode::Char('d' | 'c' | 'x'))
         {
             self.push_log("built-in programs are read-only: you can't deploy, call or forget them".to_owned());
             return;
@@ -662,9 +769,18 @@ impl App {
             }
             KeyCode::Char('L') => {
                 self.modal = Modal::Form(Form::new(
-                    "LEZ checkout (absolute, ~/…, or relative to prog-tui)".to_owned(),
-                    vec![("dir".to_owned(), self.saved.lez_dir.clone())],
-                    FormAction::LezDir,
+                    "Checkouts (absolute, ~/…, or relative to prog-tui)".to_owned(),
+                    vec![
+                        (
+                            "LEZ\nthe sequencer and the wallet".to_owned(),
+                            self.saved.lez_dir.clone(),
+                        ),
+                        (
+                            "lez-programs\nthe programs, and the jz package for example_progs".to_owned(),
+                            self.saved.programs_dir.clone(),
+                        ),
+                    ],
+                    FormAction::Dirs,
                 ));
             }
             KeyCode::Char('s') => self.toggle_sequencer(),
@@ -712,7 +828,6 @@ impl App {
             KeyCode::Char('P') => self.set_role(true),
             KeyCode::Char('A') => self.set_role(false),
             KeyCode::Char('d') => self.deploy_selected(),
-            KeyCode::Char('r') => self.run_runner(),
             KeyCode::Char('v') => self.show_messages(),
             KeyCode::Char('w') => {
                 self.modal = Modal::Form(Form::new(
@@ -866,124 +981,88 @@ impl App {
         let Some(payer) = self.need("PAYER (key P)", self.saved.payer.clone().as_ref()) else {
             return;
         };
-        self.spawn_job(&format!("deploy {guest}"), move |mut ctx| async move {
+        self.spawn_job(&format!("deploy {}", guest.name), move |mut ctx| async move {
             jobs::deploy(&mut ctx, &guest, &payer).await.map(|_| ())
         });
     }
 
-    /// The stock `run_*` runner for the selected guest: deploys again and calls once.
-    fn run_runner(&mut self) {
-        if self.focus != Focus::Guests {
-            self.push_log("select a guest in the Programs pane to run its runner".to_owned());
-            return;
-        }
-        let Some(guest) = self.guests.get(self.selected_guest).cloned() else {
-            return;
-        };
-        let Some(payer) = self.need("PAYER (key P)", self.saved.payer.clone().as_ref()) else {
-            return;
-        };
-        let account = self.saved.account.clone();
-        let bin = |name: &str| self.lez.guest_bin(name).display().to_string();
-        let args: Vec<String> = match guest.as_str() {
-            "hello_world" | "hello_world_with_authorization" => {
-                let Some(account) = account else {
-                    self.push_log("✗ set ACCOUNT first (key A)".to_owned());
-                    return;
-                };
-                vec![format!("run_{guest}"), bin(&guest), account, payer]
-            }
-            "hello_world_with_move_function" => {
-                let Some(account) = account else {
-                    self.push_log("✗ set ACCOUNT first (key A)".to_owned());
-                    return;
-                };
-                vec![
-                    "run_hello_world_with_move_function".into(),
-                    bin(&guest),
-                    payer,
-                    "write-public".into(),
-                    account,
-                    "Hola mundo!".into(),
-                ]
-            }
-            "simple_tail_call" => {
-                let Some(account) = account else {
-                    self.push_log("✗ set ACCOUNT first (key A)".to_owned());
-                    return;
-                };
-                vec![
-                    "run_hello_world_through_tail_call".into(),
-                    bin(&guest),
-                    bin("hello_world"),
-                    account,
-                    payer,
-                ]
-            }
-            "tail_call_with_pda" => vec![
-                "run_hello_world_with_authorization_through_tail_call_with_pda".into(),
-                bin(&guest),
-                bin("hello_world_with_authorization"),
-                payer,
-            ],
-            _ => {
-                self.push_log(format!("no runner for {guest}"));
-                return;
-            }
-        };
-        self.spawn_job(&args[0].clone(), move |mut ctx| async move {
-            jobs::runner(&mut ctx, &args).await
-        });
-    }
-
-    /// The messages the selected guest (or deployment) accepts: `lez-call iface`, which reads its
-    /// source.
+    /// The messages the selected guest (or deployment) accepts: from its spel IDL for one of
+    /// lez-programs' programs, else `lez-call iface`, which reads a jz guest's source.
     fn show_messages(&mut self) {
-        let source = match self.focus {
+        let target = match self.focus {
             Focus::Guests => self
                 .guests
                 .get(self.selected_guest)
-                .map(|guest| Ok(lez_call::source_of(&self.lez, guest))),
+                .map(|guest| (guest.name.clone(), guest.origin.clone(), None)),
             Focus::Deployments => self
                 .saved
                 .deployments
                 .get(self.selected_deployment)
-                .map(|deployment| self.source(deployment)),
+                .map(|d| (d.name.clone(), d.origin.clone(), Some(d.program_id.clone()))),
             _ => None,
         };
-        let Some(source) = source else {
+        let Some((name, origin, program_id)) = target else {
             self.push_log("select a guest or deployment in the Programs pane to see its messages".to_owned());
             return;
         };
-        if !self.lez_call_ready() {
-            return;
-        }
-        let result = source.and_then(|source| {
-            let lines = lez_call::text(&self.lez, &self.saved.wallet_password, &source)?;
-            Ok((source, lines))
-        });
-        match result {
-            Ok((source, lines)) => {
-                let name = source.file_stem().map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
-                self.modal = Modal::Text(format!("{name}: messages"), lines);
+        let result = if let Some(idl) = self.spel_idl(&name, &origin) {
+            spel::methods(&idl).map(|methods| {
+                let from = match &origin {
+                    Origin::Program(_) => "lez-programs",
+                    _ => "example_progs",
+                };
+                let mut lines = vec![
+                    format!("program: {name} ({from}; called with spel)"),
+                    format!("idl: {}", idl.display()),
+                    String::new(),
+                ];
+                for method in methods {
+                    lines.push(format!("  {}", method.label()));
+                    if let Some(doc) = &method.doc {
+                        lines.push(format!("      {doc}"));
+                    }
+                }
+                lines
+            })
+        } else {
+            if !self.lez_call_ready() {
+                return;
             }
+            self.jz_source(&name, &origin, program_id.as_deref())
+                .and_then(|source| lez_call::text(&self.lez, &self.saved.wallet_password, &source))
+        };
+        match result {
+            Ok(lines) => self.modal = Modal::Text(format!("{name}: messages"), lines),
             Err(error) => self.push_log(format!("✗ {error:#}")),
         }
     }
 
-    /// The source `lez-call` reads for a deployment: its guest's, by name, when there is one;
-    /// else the guest whose build has the image id in the program's header (`lez-dryrun
-    /// source-of`).
-    fn source(&self, deployment: &Deployment) -> anyhow::Result<PathBuf> {
-        let source = lez_call::source_of(&self.lez, &deployment.name);
+    /// The spel IDL a guest is called with: a lez-programs program's, from `make idl`, or a jz
+    /// guest's, from `spel generate-idl` when its message is an `enum Message`. `None` sends the
+    /// call through `lez-call` instead.
+    fn spel_idl(&self, name: &str, origin: &Origin) -> Option<PathBuf> {
+        match origin {
+            Origin::Program(program) => Some(self.programs.idl(program)),
+            Origin::Jz => Some(self.programs.jz_idl(name)).filter(|idl| idl.is_file()),
+            Origin::Unknown => None,
+        }
+    }
+
+    /// The source `lez-call` reads for a jz guest: its own, by name, when there is one; else the
+    /// jz guest whose build has the image id in the program's header (`lez-dryrun source-of`).
+    fn jz_source(&self, name: &str, origin: &Origin, program_id: Option<&str>) -> anyhow::Result<PathBuf> {
+        let source = lez_call::source_of(&self.programs, name);
         if source.is_file() {
             return Ok(source);
         }
-        let guest = lez_call::guest_of(&self.lez, &deployment.program_id)?;
-        Ok(lez_call::source_of(&self.lez, &guest))
+        let Some(program_id) = program_id.filter(|_| *origin == Origin::Unknown) else {
+            anyhow::bail!("no source for {name} at {}: build first (key b)", source.display());
+        };
+        let guest = lez_call::guest_of(&self.lez, &self.programs, program_id)?;
+        Ok(lez_call::source_of(&self.programs, &guest))
     }
 
-    /// `c`: pick one of the deployment's messages, from `lez-call iface`.
+    /// `c`: pick one of the deployment's messages, from its spel IDL or `lez-call iface`.
     fn open_pick(&mut self) {
         if self.focus != Focus::Deployments {
             self.push_log("select a deployment in the Programs pane to call it".to_owned());
@@ -992,13 +1071,48 @@ impl App {
         let Some(deployment) = self.saved.deployments.get(self.selected_deployment).cloned() else {
             return;
         };
+        if let Some(idl) = self.spel_idl(&deployment.name, &deployment.origin) {
+            if !self.spel_ready() {
+                return;
+            }
+            let methods = match spel::methods(&idl) {
+                Ok(methods) => methods,
+                Err(error) => {
+                    self.push_log(format!("✗ no messages for {}: {error:#}", deployment.name));
+                    return;
+                }
+            };
+            let options = methods
+                .into_iter()
+                .map(|method| {
+                    let mut label = method.label();
+                    if let Some(doc) = &method.doc {
+                        label.push_str(&format!(" — {doc}"));
+                    }
+                    let action = PickAction::SpelMethod {
+                        deployment: deployment.clone(),
+                        method,
+                        idl: idl.clone(),
+                    };
+                    (label, action)
+                })
+                .collect();
+            self.modal = Modal::Pick(Pick {
+                title: format!("{}: pick a message (spel)", deployment.name),
+                options,
+                selected: 0,
+            });
+            return;
+        }
         if !self.lez_call_ready() {
             return;
         }
-        let found = self.source(&deployment).and_then(|source| {
-            let interface = lez_call::interface(&self.lez, &self.saved.wallet_password, &source)?;
-            Ok((source, interface))
-        });
+        let found = self
+            .jz_source(&deployment.name, &deployment.origin, Some(&deployment.program_id))
+            .and_then(|source| {
+                let interface = lez_call::interface(&self.lez, &self.saved.wallet_password, &source)?;
+                Ok((source, interface))
+            });
         let (source, interface) = match found {
             Ok(found) => found,
             Err(error) => {
@@ -1114,19 +1228,24 @@ impl App {
                     jobs::transfer(&mut ctx, &from, &to, amount).await
                 });
             }
-            FormAction::LezDir => {
+            FormAction::Dirs => {
                 self.saved.lez_dir.clone_from(&values[0]);
-                self.lez = Lez::new(state::resolve_lez_dir(&self.crate_dir, &values[0]));
+                self.saved.programs_dir.clone_from(&values[1]);
+                self.lez = Lez::new(state::resolve_dir(&self.crate_dir, &values[0]));
+                self.programs = Programs::new(state::resolve_dir(&self.crate_dir, &values[1]));
                 self.rpc = Rpc::new(self.lez.sequencer_url());
                 self.accounts.clear();
                 self.views.clear();
-                self.guests = self.lez.guests();
+                self.guests = self.programs.guests();
                 self.save();
                 self.refresh_now();
+                let missing = |present: bool| if present { "" } else { " (not present)" };
                 self.push_log(format!(
-                    "LEZ at {}{}",
+                    "LEZ at {}{} · lez-programs at {}{}",
                     self.lez.dir.display(),
-                    if self.lez.present() { "" } else { " (not present)" }
+                    missing(self.lez.present()),
+                    self.programs.dir.display(),
+                    missing(self.programs.present()),
                 ));
             }
             FormAction::Watch => {
@@ -1171,8 +1290,117 @@ impl App {
                     jobs::plan(&mut ctx, title, request).await
                 });
             }
+            FormAction::SpelPlan {
+                ref program_id,
+                ref name,
+                ref method,
+                ref idl,
+            } => {
+                if !self.spel_ready() {
+                    return;
+                }
+                let Some(payer) = self.need("PAYER (key P)", self.saved.payer.clone().as_ref()) else {
+                    return;
+                };
+                let call = match spel_call(&payer, program_id, name, idl, method, &values) {
+                    Ok(call) => call,
+                    Err(error) => {
+                        self.push_log(format!("✗ {error}"));
+                        self.modal = Modal::Form(form);
+                        return;
+                    }
+                };
+                let title = format!("{name}: {}", method.name);
+                self.spawn_job(&format!("plan {title}"), move |mut ctx| async move {
+                    jobs::spel_plan(&mut ctx, title, call).await
+                });
+            }
         }
     }
+}
+
+/// The form for one message of a lez-programs program: the actor it goes to, each IDL field (an
+/// account field prefilled with `ACCOUNT`), then who signs and more actors to declare. spel never
+/// works out signers, so `signers` starts as `ACCOUNT`.
+fn spel_form(saved: &Saved, deployment: &Deployment, method: Method, idl: PathBuf) -> Form {
+    let account = saved.account.clone().unwrap_or_default();
+    let mut fields = vec![(
+        "to\nthe actor it goes to: an account (on this program) or account@program; a wallet label or base58; pda:<account>".to_owned(),
+        account.clone(),
+    )];
+    for param in &method.params {
+        let value = if param.ty == "account_id" {
+            account.clone()
+        } else {
+            String::new()
+        };
+        fields.push((format!("{}: {}\n{}", param.name, param.ty, param.hint), value));
+    }
+    let params = method.params.len();
+    fields.push((
+        "signers\ncomma-separated accounts that authorize: each actor of theirs in the call".to_owned(),
+        account,
+    ));
+    fields.push((
+        "actors\noptional, comma-separated actors spel can't see from the fields: account@program; pda:<account> (this program's PDA seeded by that account); clock".to_owned(),
+        String::new(),
+    ));
+    let mut form = Form::new(
+        format!("{}: {} → spel send --dry-run", deployment.name, method.name),
+        fields,
+        FormAction::SpelPlan {
+            program_id: deployment.program_id.clone(),
+            name: deployment.name.clone(),
+            method,
+            idl,
+        },
+    );
+    form.selected = form.fields[1..=params]
+        .iter()
+        .position(|(_, value)| value.is_empty())
+        .map_or(0, |i| i + 1);
+    form
+}
+
+/// The `spel send` the form's values ask for: `to`, the fields, `signers` and `actors`.
+fn spel_call(
+    payer: &str,
+    program_id: &str,
+    name: &str,
+    idl: &std::path::Path,
+    method: &Method,
+    values: &[String],
+) -> Result<SpelCall, String> {
+    let params = method.params.len();
+    let (to, rest) = (&values[0], &values[params + 1..]);
+    if to.is_empty() {
+        return Err("to is empty".to_owned());
+    }
+    Ok(SpelCall {
+        name: name.to_owned(),
+        idl: idl.to_path_buf(),
+        program_id: program_id.to_owned(),
+        payer: payer.to_owned(),
+        message: method.name.clone(),
+        root: to.clone(),
+        signers: list(&rest[0]),
+        actors: list(&rest[1]),
+        fields: method
+            .params
+            .iter()
+            .zip(&values[1..=params])
+            .map(|(param, value)| (param.name.clone(), value.clone()))
+            .collect(),
+    })
+}
+
+/// A comma-separated list, without empty items.
+fn list(text: &str) -> Vec<String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// The form for one message: where it goes, and each param (an account id prefilled with
@@ -1253,13 +1481,6 @@ fn call_request(
         "n" | "no" | "false" => Some(false),
         other => return Err(format!("sign is auto, y or n, not {other:?}")),
     };
-    let list = |text: &str| -> Vec<String> {
-        text.split(',')
-            .map(str::trim)
-            .filter(|item| !item.is_empty())
-            .map(str::to_owned)
-            .collect()
-    };
     Ok(CallRequest {
         payer: payer.to_owned(),
         program_id: program_id.to_owned(),
@@ -1339,5 +1560,32 @@ mod tests {
 
         assert!(call_request("PAY", "PROG", &hello, true, &values(&["", "Hi", "auto", "", ""])).is_err());
         assert!(call_request("PAY", "PROG", &hello, true, &values(&["ACC", "Hi", "maybe", "", ""])).is_err());
+    }
+
+    #[test]
+    fn the_spel_form_gives_the_send() {
+        let new = method("NewDefinition", &[("name", "string"), ("total_supply", "u128"), ("holding", "account_id")]);
+        let call = spel_call(
+            "PAY",
+            "PROG",
+            "token",
+            std::path::Path::new("/idl.json"),
+            &new,
+            &values(&["DEF", "JZ", "1000", "ACC", "DEF, ACC", ""]),
+        )
+        .unwrap();
+        assert_eq!(call.root, "DEF");
+        assert_eq!(call.signers, ["DEF", "ACC"]);
+        assert!(call.actors.is_empty());
+        assert_eq!(call.message, "NewDefinition");
+        assert_eq!(
+            call.fields,
+            [
+                ("name".to_owned(), "JZ".to_owned()),
+                ("total_supply".to_owned(), "1000".to_owned()),
+                ("holding".to_owned(), "ACC".to_owned())
+            ]
+        );
+        assert!(spel_call("PAY", "PROG", "token", std::path::Path::new("/i"), &new, &values(&["", "JZ", "1", "ACC", "", ""])).is_err());
     }
 }

@@ -12,13 +12,14 @@ use crate::{
     app::{AccountRow, App, Focus, Modal},
     jobs::{StepState, short},
     rpc::{NATIVE_TOKEN, describe_bytes, format_balance},
+    state::Origin,
 };
 
 const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let [top, main, bottom, keys] = Layout::vertical([
-        Constraint::Length(2),
+        Constraint::Length(3),
         Constraint::Min(8),
         Constraint::Length(12),
         Constraint::Length(1),
@@ -95,10 +96,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 })
                 .collect();
             let keys = if scrolls { " · ↑↓ PgUp/PgDn scroll" } else { "" };
-            let (footer, color) = if view.call.is_some() {
-                (format!(" Enter send (wallet program call) · Esc cancel{keys} "), Color::Yellow)
-            } else {
-                (format!(" the dry run failed: nothing to send · Esc closes{keys} "), Color::Red)
+            let (footer, color) = match &view.call {
+                Some(call) => (format!(" Enter send ({}) · Esc cancel{keys} ", call.sender()), Color::Yellow),
+                None => (format!(" nothing to send (see above) · Esc closes{keys} "), Color::Red),
             };
             frame.render_widget(
                 Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((scroll, 0)).block(
@@ -227,22 +227,42 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         if repo.dirty {
             lez.push(Span::raw(" dirty").yellow());
         }
-        lez.push(Span::raw("  lez-call "));
-        lez.push(match (repo.lez_call, repo.lez_call_checkout) {
-            (true, _) => Span::raw("✓").green(),
-            (false, true) => Span::raw("not built (b)").yellow(),
-            (false, false) => Span::raw("missing (runners only)").red(),
-        });
-        lez.push(Span::raw("  dry run "));
-        lez.push(match (repo.lez_dryrun, repo.lez_dryrun_checkout) {
-            (true, _) => Span::raw("✓").green(),
-            (false, true) => Span::raw("not built (b)").yellow(),
-            (false, false) => Span::raw("off").yellow(),
-        });
     } else if app.lez.present() {
         lez.push(Span::raw("  …"));
     } else {
         lez.push(Span::raw("  not present (L to change)").red());
+    }
+
+    let info = &app.status.programs;
+    let mut progs = vec![Span::raw("PROGS ").bold(), Span::raw(app.saved.programs_dir.clone())];
+    if info.present {
+        progs.push(Span::raw("  "));
+        progs.push(Span::raw(info.branch.clone().unwrap_or_else(|| "(detached)".into())).green());
+        progs.push(Span::raw(format!(" {}", info.head.clone().unwrap_or_default())));
+        if info.dirty {
+            progs.push(Span::raw(" dirty").yellow());
+        }
+    } else if app.programs.present() {
+        progs.push(Span::raw("  …"));
+    } else {
+        progs.push(Span::raw("  not present (L to change)").red());
+    }
+    let tool = |built: bool, checkout: bool, missing: &'static str| match (built, checkout) {
+        (true, _) => Span::raw("✓").green(),
+        (false, true) => Span::raw("not built (b)").yellow(),
+        (false, false) => Span::raw(missing).red(),
+    };
+    if repo.present {
+        progs.push(Span::raw("  spel "));
+        progs.push(tool(repo.spel, repo.spel_checkout, "missing (no token/nft calls)"));
+        progs.push(Span::raw("  lez-call "));
+        progs.push(tool(repo.lez_call, repo.lez_call_checkout, "missing (no jz calls)"));
+        progs.push(Span::raw("  dry run "));
+        progs.push(match (repo.lez_dryrun, repo.lez_dryrun_checkout) {
+            (true, _) => Span::raw("✓").green(),
+            (false, true) => Span::raw("not built (b)").yellow(),
+            (false, false) => Span::raw("off").yellow(),
+        });
     }
 
     let seq = &app.status.seq;
@@ -276,7 +296,7 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         .cyan());
     }
     frame.render_widget(
-        Paragraph::new(vec![Line::from(lez), Line::from(second)]),
+        Paragraph::new(vec![Line::from(lez), Line::from(progs), Line::from(second)]),
         area,
     );
 }
@@ -466,8 +486,14 @@ fn push_view(lines: &mut Vec<Line<'static>>, app: &App, id: &str) {
                     Span::raw(app.program_label(program)).cyan(),
                     Span::raw(format!("  {}  {} B", short(program), bytes.len())).dark_gray(),
                 ]));
+                let decoded = app
+                    .decoded
+                    .get(&(id.to_owned(), program.clone(), bytes.clone()))
+                    .filter(|text| !text.is_empty());
                 let shown = if program == NATIVE_TOKEN {
                     format!("balance {}", crate::rpc::decode_u128_le(bytes))
+                } else if let Some(text) = decoded {
+                    format!("{text}  (spel)")
                 } else {
                     describe_bytes(bytes)
                 };
@@ -493,11 +519,18 @@ fn draw_programs(frame: &mut Frame, area: Rect, app: &App) {
                 .saved
                 .deployments
                 .iter()
-                .filter(|d| &d.name == guest && !d.stale)
+                .filter(|d| d.name == guest.name && !d.stale)
                 .count();
-            let mut spans = vec![Span::raw(guest.clone())];
-            if guest.starts_with(crate::userprogs::PREFIX) {
-                spans.push(Span::raw(" (example_progs)").dark_gray());
+            let mut spans = vec![Span::raw(guest.name.clone())];
+            spans.push(
+                Span::raw(match guest.origin {
+                    Origin::Program(_) => " (lez-programs)",
+                    _ => " (example_progs)",
+                })
+                .dark_gray(),
+            );
+            if !guest.built() {
+                spans.push(Span::raw(" not built (b)").yellow());
             }
             if count > 0 {
                 spans.push(Span::raw(format!(" ×{count}")).green());
@@ -506,9 +539,9 @@ fn draw_programs(frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     let guests_title = if app.guests.is_empty() {
-        "Guests ($BIN): none built, press b"
+        "Guests: none found, check lez-programs (L) and press b"
     } else {
-        "Guests ($BIN)"
+        "Guests"
     };
     frame.render_stateful_widget(
         List::new(guests)
@@ -617,7 +650,7 @@ fn draw_checklist(frame: &mut Frame, area: Rect, app: &App) {
 fn draw_keys(frame: &mut Frame, area: Rect, app: &App) {
     let context = match app.focus {
         Focus::Accounts => "P payer · A account · n new · t transfer · w watch · x forget watched",
-        Focus::Guests => "v messages · d deploy · r stock runner · u build+deploy file",
+        Focus::Guests => "v messages · d deploy · u build+deploy an example_progs file",
         Focus::Deployments => "c call (pick message) · v messages · x forget",
         Focus::Builtin => "read-only: details in the middle pane",
     };
@@ -632,24 +665,23 @@ fn draw_keys(frame: &mut Frame, area: Rect, app: &App) {
 
 fn draw_help(frame: &mut Frame) {
     let keys = [
-        ("W", "walkthrough: build, reset, wallet, PAYER/ACCOUNT, deploy and call hello_world"),
+        ("W", "walkthrough: build, reset, wallet, PAYER/ACCOUNT, deploy token, create a token"),
         ("s", "start the sequencer, or stop it (asks first if prog-tui didn't start it)"),
         ("R", "reset: stop, `just clean`, start (wipes the chain and the wallet)"),
-        ("b", "build wallet, runners, the example guests, lez-call and lez-dryrun"),
+        ("b", "build the wallet, lez-programs' programs + IDLs, the jz guests, spel, lez-call, lez-dryrun"),
         ("i", "initialise the wallet and import the two funded test accounts"),
         ("n", "new public account"),
         ("w / x", "watch an account outside the wallet (a PDA, say) / forget the selected one"),
         ("P / A", "make the selected account PAYER / ACCOUNT"),
         ("t", "native token transfer (wallet auth-transfer send), checked by both balances"),
-        ("v", "the messages the selected guest or deployment accepts (lez-call iface)"),
+        ("v", "the messages the selected guest or deployment accepts (spel IDL, or lez-call iface)"),
         ("d", "deploy the selected guest (wallet program-loader deploy; Guests pane)"),
-        ("r", "run the guest's stock run_* runner: deploys again and calls once"),
         ("u", "build and deploy a guest from jz-progs/example_progs (as jz_<name>)"),
-        ("c", "call the selected deployment: pick a message, fill in its params, check the plan"),
+        ("c", "call the selected deployment: pick a message, fill in its fields, check the plan"),
         ("x", "forget the selected deployment"),
         ("h", "show or hide the header/segment accounts that deploys create"),
         ("e", "shell commands for the sequencer (log, wallet, stop) and the env.sh to source"),
-        ("L", "change the LEZ checkout"),
+        ("L", "change the LEZ and lez-programs checkouts"),
         ("g", "refresh now"),
         ("Tab / ←→", "switch pane (Accounts, Guests, Deployed, Built-in); ↑↓ or j/k select"),
         ("q", "quit (the sequencer keeps running)"),
