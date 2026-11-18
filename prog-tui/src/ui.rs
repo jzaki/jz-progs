@@ -721,7 +721,7 @@ fn draw_keys(frame: &mut Frame, area: Rect, app: &App) {
     if app.view == View::L1 {
         frame.render_widget(
             Paragraph::new(
-                " j/k wallet · c config · C config path · g refresh │ 1 LEZ · 2 L1 · N network · ? help · q quit",
+                " s start/stop node · b bridge to LEZ · j/k wallet · c config · C config path · g refresh │ 1 LEZ · 2 L1 · N network · ? help · q quit",
             )
             .dark_gray(),
             area,
@@ -765,6 +765,8 @@ fn draw_help(frame: &mut Frame) {
         ("N", "back to the network selector: local standalone, or one from networks.json"),
         ("g", "refresh now"),
         ("1 / 2", "the LEZ view / the L1 view: the logosctl daemon, the node and its wallets (read-only)"),
+        ("L1: s", "start the L1 node (daemon, module, node), or stop it and the daemon (asks first)"),
+        ("L1: b", "bridge L1 funds to a LEZ account (channel_deposit): pick the account, the amount, check the plan"),
         ("L1: c / C", "show the node's config (secrets hidden) / set which config file the node uses"),
         ("Tab / ←→", "switch pane (Accounts, Guests, Deployed, Built-in); ↑↓ or j/k select"),
         ("q", "quit (the sequencer keeps running)"),
@@ -869,7 +871,10 @@ fn field(value: Option<&serde_json::Value>, key: &str) -> String {
 
 fn start_hint(lines: &mut Vec<Line<'static>>, l1: &L1Status, config: Option<&std::path::Path>) {
     lines.push(Line::default());
-    lines.push(Line::from("to run the node yourself:").dark_gray());
+    lines.push(Line::from(vec![
+        Span::raw("s").cyan(),
+        Span::raw(" starts it here; by hand, that's:").dark_gray(),
+    ]));
     let config = config.map_or("<user_config.yaml>".to_owned(), |path| path.display().to_string());
     let mut commands = Vec::new();
     if !l1.running() {
@@ -878,7 +883,7 @@ fn start_hint(lines: &mut Vec<Line<'static>>, l1: &L1Status, config: Option<&std
     if !l1.module_loaded() {
         commands.push(format!("logosctl module load {MODULE}"));
     }
-    commands.push(format!("logosctl call {MODULE} start {config} \"\""));
+    commands.push(format!("logosctl call {MODULE} start str:{config} str:"));
     for command in commands {
         lines.push(Line::from(format!("  {command}")).cyan());
     }

@@ -838,6 +838,8 @@ pub enum Planned {
     Wallet(PlannedCall),
     /// A lez-programs program's: `spel send`, which simulates before it sends.
     Spel(SpelCall),
+    /// L1 funds into a LEZ account: the L1 module's `channel_deposit`.
+    Bridge(crate::l1::BridgeCall),
 }
 
 impl Planned {
@@ -845,6 +847,7 @@ impl Planned {
         match self {
             Self::Wallet(call) => &call.name,
             Self::Spel(call) => &call.name,
+            Self::Bridge(_) => "bridge",
         }
     }
 
@@ -853,6 +856,7 @@ impl Planned {
         match self {
             Self::Wallet(_) => "wallet program call",
             Self::Spel(_) => "spel send",
+            Self::Bridge(_) => "logosctl channel_deposit",
         }
     }
 }

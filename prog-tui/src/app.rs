@@ -79,6 +79,8 @@ pub enum FormAction {
     Dirs,
     /// The L1 node's config: field `config`.
     L1Config,
+    /// Bridge L1 funds into a LEZ account: fields `to`, `amount`, `from (L1)`, `channel`.
+    Bridge,
     /// Watch an account outside the wallet: fields `id`, `note`.
     Watch,
     /// Plan one message: fields `to`, one per param, then `sign`, `actors` and `pda seeds`.
@@ -125,6 +127,8 @@ pub enum PickAction {
         method: Method,
         idl: PathBuf,
     },
+    /// Bridge L1 funds into this LEZ account (base58): ask the amount next.
+    BridgeTo(String),
 }
 
 /// A call's plan on screen: Enter sends it (`wallet program call` or `spel send`), when it can be
@@ -144,6 +148,8 @@ pub enum Confirmed {
     Reset(Option<StopTarget>),
     Walkthrough(Option<StopTarget>),
     StopExternal(i32),
+    /// Stop the L1 node and the logosctl daemon.
+    L1Stop,
 }
 
 pub enum Modal {
@@ -465,14 +471,22 @@ impl App {
 
         self.decode_selected();
 
-        // The L1 view refreshes often; otherwise only enough for the status bar's dot.
-        let every = if self.view == View::L1 { 5 } else { 30 };
+        // The L1 view refreshes often, and asks the node itself; otherwise only the daemon, for
+        // the status bar's dot. A node that didn't answer (still syncing) is asked again after a
+        // minute, not every 5s.
+        let full = self.view == View::L1;
+        let unanswered = self.l1.node.as_ref().is_some_and(|node| node.chain.is_none());
+        let every = match (full, unanswered) {
+            (true, false) => 5,
+            (true, true) => 60,
+            (false, _) => 30,
+        };
         if !self.refreshing.l1 && due(self.last_l1, every) {
             self.refreshing.l1 = true;
             self.last_l1 = Some(Instant::now());
             let (config, tx) = (self.l1_config(), self.tx.clone());
             self.rt.spawn(async move {
-                let _ = tx.send(Msg::L1(l1::gather(config).await));
+                let _ = tx.send(Msg::L1(l1::gather(config, full).await));
             });
         }
 
@@ -819,6 +833,7 @@ impl App {
                         match call {
                             Planned::Wallet(call) => jobs::call(&mut ctx, &call).await,
                             Planned::Spel(call) => jobs::spel_call(&mut ctx, &call).await,
+                            Planned::Bridge(call) => l1::bridge(&mut ctx, &call).await,
                         }
                     });
                 }
@@ -855,6 +870,7 @@ impl App {
                             method,
                             idl,
                         } => spel_form(&self.saved, &deployment, method, idl),
+                        PickAction::BridgeTo(to) => self.bridge_form(to),
                     });
                 }
                 return;
@@ -1038,7 +1054,90 @@ impl App {
         }
     }
 
-    /// The L1 view's keys. It only reads, so the LEZ keys that act are refused here.
+    /// The channel a deposit goes through: the network's, from `networks.json`, else the one its
+    /// sequencer reports.
+    fn bridge_channel(&self) -> Option<String> {
+        match &self.network {
+            Network::Remote { channel_id: Some(id), .. } => Some(id.clone()),
+            _ => self.status.seq.channel_id.clone(),
+        }
+    }
+
+    /// `b` on the L1 view: pick the LEZ account to credit, `ACCOUNT` first selected.
+    fn open_bridge(&mut self) {
+        if !self.l1.running() || self.l1.node.as_ref().and_then(|node| node.chain.as_ref()).is_none() {
+            self.push_log("✗ bridging needs the L1 node running (s starts it)".to_owned());
+            return;
+        }
+        let accounts: Vec<WalletAccount> =
+            self.accounts.iter().filter(|account| account.public).cloned().collect();
+        if accounts.is_empty() {
+            self.push_log(format!(
+                "✗ no public LEZ accounts on {}: i initialises the wallet, n makes one (LEZ view)",
+                self.network.label()
+            ));
+            return;
+        }
+        let options: Vec<(String, PickAction)> = accounts
+            .iter()
+            .map(|account| {
+                let mut label = account.id.clone();
+                if let Some(name) = &account.label {
+                    label.push_str(&format!(" [{name}]"));
+                }
+                if self.saved.account.as_deref() == Some(&account.id) {
+                    label.push_str(" ▶ ACCOUNT");
+                }
+                if self.saved.payer.as_deref() == Some(&account.id) {
+                    label.push_str(" ★ PAYER");
+                }
+                if let Some(Some(view)) = self.views.get(&account.id) {
+                    label.push_str(&format!("  balance {}", view.balance()));
+                }
+                (label, PickAction::BridgeTo(account.id.clone()))
+            })
+            .collect();
+        let selected = accounts
+            .iter()
+            .position(|account| self.saved.account.as_deref() == Some(&account.id))
+            .unwrap_or(0);
+        self.modal = Modal::Pick(Pick {
+            title: format!("Bridge L1 funds to which LEZ account? ({})", self.network.label()),
+            options,
+            selected,
+        });
+    }
+
+    /// The deposit's details, after the LEZ account is picked. The L1 address defaults to the
+    /// selected L1 wallet when it holds funds, else the first that does.
+    fn bridge_form(&self, to: String) -> Form {
+        let funded = |wallet: &&l1::L1Wallet| {
+            wallet.balance.as_ref().is_ok_and(|b| b.parse::<u128>().is_ok_and(|b| b > 0))
+        };
+        let from = self
+            .l1
+            .wallets
+            .get(self.selected_l1_wallet)
+            .filter(funded)
+            .or_else(|| self.l1.wallets.iter().find(funded))
+            .map(|wallet| wallet.address.clone())
+            .unwrap_or_default();
+        Form::new(
+            "Bridge L1 → LEZ (L1 module channel_deposit)".to_owned(),
+            vec![
+                ("to\nthe LEZ account credited (public)".to_owned(), to),
+                ("amount".to_owned(), String::new()),
+                ("from (L1)\nthe L1 address that pays, hex".to_owned(), from),
+                (
+                    "channel\nthe LEZ network's channel on L1".to_owned(),
+                    self.bridge_channel().unwrap_or_default(),
+                ),
+            ],
+            FormAction::Bridge,
+        )
+    }
+
+    /// The L1 view's keys. The LEZ keys don't apply here.
     fn on_l1_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('N') | KeyCode::Char('?') => {
@@ -1058,6 +1157,20 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => {
                 self.selected_l1_wallet = self.selected_l1_wallet.saturating_sub(1);
             }
+            KeyCode::Char('s') => {
+                if self.l1.running() {
+                    self.modal = Modal::Confirm(
+                        "Stop the L1 node and the logosctl daemon? (`blockchain_module stop`, then `logosctl daemon stop`) y/n".to_owned(),
+                        Confirmed::L1Stop,
+                    );
+                } else {
+                    let config = self.l1_config();
+                    self.spawn_job("start L1 node", move |mut ctx| async move {
+                        l1::start(&mut ctx, config).await
+                    });
+                }
+            }
+            KeyCode::Char('b') => self.open_bridge(),
             KeyCode::Char('C') => {
                 self.modal = Modal::Form(Form::new(
                     "The L1 node's config (absolute, ~/…, or relative to prog-tui)".to_owned(),
@@ -1084,7 +1197,7 @@ impl App {
                 });
             }
             KeyCode::Char(_) | KeyCode::Tab | KeyCode::BackTab => {
-                self.push_log("the L1 view only reads: 1 switches back to LEZ".to_owned());
+                self.push_log("L1 view keys: s start/stop · b bridge · c/C config · j/k · g; 1 switches back to LEZ".to_owned());
             }
             _ => {}
         }
@@ -1142,6 +1255,10 @@ impl App {
                 self.spawn_job("stop sequencer", move |mut ctx| async move {
                     jobs::stop_sequencer(&mut ctx, StopTarget::External(pid)).await
                 });
+            }
+            Confirmed::L1Stop => {
+                self.spawn_job("stop L1 node", |mut ctx| async move { l1::stop(&mut ctx).await });
+                self.last_l1 = None;
             }
         }
     }
@@ -1477,6 +1594,23 @@ impl App {
                     self.programs.dir.display(),
                     missing(self.programs.present()),
                 ));
+            }
+            FormAction::Bridge => {
+                let to = jobs::bare_account_id(&values[0]).to_owned();
+                let Some(amount) = values[1].parse::<u64>().ok().filter(|amount| *amount > 0) else {
+                    self.push_log(format!("✗ amount must be a whole number above 0, not {:?}", values[1]));
+                    self.modal = Modal::Form(form);
+                    return;
+                };
+                let request = l1::BridgeRequest {
+                    from: values[2].clone(),
+                    to,
+                    amount,
+                    channel: values[3].clone(),
+                };
+                self.spawn_job("plan bridge", move |mut ctx| async move {
+                    l1::plan_bridge(&mut ctx, request).await
+                });
             }
             FormAction::L1Config => {
                 self.saved.l1_config.clone_from(&values[0]);

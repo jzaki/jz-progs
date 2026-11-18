@@ -5,6 +5,9 @@
 //! logosctl can't say which config the node was started with, so that path is a prog-tui setting
 //! (`Saved::l1_config`). Its directory's `keystore.yaml` names the wallet addresses: only its
 //! `public_keys:` block is read.
+//!
+//! Besides reading, two jobs act: starting or stopping the node (daemon, module, node), and
+//! bridging L1 funds into a LEZ account with the module's `channel_deposit`.
 
 use std::{
     collections::BTreeMap,
@@ -13,14 +16,42 @@ use std::{
     time::Duration,
 };
 
+use anyhow::{Context as _, anyhow, bail};
 use serde_json::Value;
-use tokio::{process::Command, task::JoinSet};
+use tokio::process::Command;
+
+use crate::jobs::{self, Ctx, Msg, Planned};
 
 /// The module that runs the node.
 pub const MODULE: &str = "blockchain_module";
 
-/// How long one logosctl command may take before it counts as failed.
-const TIMEOUT: Duration = Duration::from_secs(10);
+/// How long prog-tui waits for one logosctl command. A slower one is left to finish on its own:
+/// killing a client mid-call can crash the daemon (it segfaulted in libQt6RemoteObjects when its
+/// clients were killed, logosctl 1.0.0), so prog-tui never kills one.
+const TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A logosctl client: in a session of its own, so a terminal hang-up or Ctrl-C in prog-tui never
+/// reaches it, and never killed, not even when prog-tui stops waiting for it.
+fn client(program: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(program);
+    command
+        .arg("--json")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(false);
+    // SAFETY: setsid(2) is async-signal-safe, so it may run between fork and exec.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command
+}
 
 /// What the daemon reported about itself.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -151,18 +182,10 @@ pub fn basecamp_config() -> Option<String> {
 /// Runs `logosctl --json <args>` and parses what it prints. A non-zero exit with a JSON error
 /// (`{"status":"error","message":…}`) comes back as that message.
 async fn logosctl(program: &Path, args: &[&str]) -> Result<Value, String> {
-    let output = tokio::time::timeout(
-        TIMEOUT,
-        Command::new(program)
-            .arg("--json")
-            .args(args)
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .map_err(|_| format!("logosctl {} took over {}s", args.join(" "), TIMEOUT.as_secs()))?
-    .map_err(|error| format!("couldn't run logosctl: {error}"))?;
+    let output = tokio::time::timeout(TIMEOUT, client(program, args).output())
+        .await
+        .map_err(|_| format!("logosctl {} took over {}s", args.join(" "), TIMEOUT.as_secs()))?
+        .map_err(|error| format!("couldn't run logosctl: {error}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     match serde_json::from_str::<Value>(stdout.trim()) {
         Ok(value) => match top_level_error(&value) {
@@ -216,9 +239,17 @@ pub fn call_value(reply: &Value) -> Result<Value, String> {
     })
 }
 
+/// A text argument for `logosctl call`: `str:<text>`. logosctl otherwise guesses types, so `1` (or a
+/// hex string that happens to be all digits) would go as a number, and the module, whose
+/// parameters here are all text, fails it with no reason given.
+pub fn text_arg(text: &str) -> String {
+    format!("str:{text}")
+}
+
 async fn call(program: &Path, method: &str, args: &[&str]) -> Result<Value, String> {
+    let texts: Vec<String> = args.iter().map(|arg| text_arg(arg)).collect();
     let mut all = vec!["call", MODULE, method];
-    all.extend_from_slice(args);
+    all.extend(texts.iter().map(String::as_str));
     call_value(&logosctl(program, &all).await?)
 }
 
@@ -310,9 +341,13 @@ fn names_beside(config: Option<&Path>) -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
-/// Asks logosctl about the daemon, the node and its wallets. The node's calls and the balances run
-/// at once, since each logosctl run takes about half a second.
-pub async fn gather(config: Option<PathBuf>) -> L1Status {
+/// Asks logosctl about the daemon, the node and its wallets, one call at a time. With `full` false,
+/// only the daemon and its modules (`logosctl status`): no call reaches the node.
+///
+/// The node is asked `get_cryptarchia_info` first, and nothing more when that fails: a node that is
+/// still syncing answers slowly, and logosctl 1.0.0's daemon has segfaulted while calls to a
+/// syncing node were pending, so prog-tui keeps them to one.
+pub async fn gather(config: Option<PathBuf>, full: bool) -> L1Status {
     let mut status = L1Status {
         logosctl: logosctl_path(),
         config_dir: session_dir(),
@@ -334,64 +369,48 @@ pub async fn gather(config: Option<PathBuf>) -> L1Status {
             return status;
         }
     }
-    if !status.running() {
+    if !status.running() || !full {
         return status;
     }
 
-    let mut tasks = JoinSet::new();
-    let methods = [
-        "get_cryptarchia_info",
-        "get_network_info",
-        "get_time_info",
-        "pow_status",
-        "wallet_get_claimable_vouchers",
-    ];
-    if status.module_loaded() {
-        for method in methods {
-            let program = program.clone();
-            tasks.spawn(async move { (method.to_owned(), call(&program, method, &[]).await) });
-        }
-        let program = program.clone();
-        tasks.spawn(async move {
-            let addresses = call(&program, "wallet_get_known_addresses", &[]).await;
-            ("wallet_get_known_addresses".to_owned(), addresses)
-        });
+    // One call at a time: concurrent calls slow a bootstrapping node down to timeouts.
+    if let Ok(stats) = logosctl(&program, &["module", "stats"]).await {
+        merge_stats(&mut status.modules, &stats);
     }
-    {
-        let program = program.clone();
-        tasks.spawn(async move {
-            ("stats".to_owned(), logosctl(&program, &["module", "stats"]).await)
-        });
-    }
-
-    let mut node = status.module_loaded().then(Node::default);
+    let mut node = None;
     let mut addresses = None;
-    while let Some(joined) = tasks.join_next().await {
-        let Ok((what, result)) = joined else { continue };
-        if what == "stats" {
-            if let Ok(stats) = result {
-                merge_stats(&mut status.modules, &stats);
-            }
-            continue;
-        }
-        if what == "wallet_get_known_addresses" {
-            addresses = Some(result);
-            continue;
-        }
-        let Some(node) = node.as_mut() else { continue };
-        let slot = match what.as_str() {
-            "get_cryptarchia_info" => &mut node.chain,
-            "get_network_info" => &mut node.network,
-            "get_time_info" => &mut node.time,
-            "pow_status" => &mut node.pow,
-            _ => &mut node.vouchers,
-        };
-        match result {
-            Ok(value) => *slot = Some(value),
+    if status.module_loaded() {
+        let mut found = Node::default();
+        match call(&program, "get_cryptarchia_info", &[]).await {
+            Ok(chain) => found.chain = Some(chain),
             Err(error) => {
-                node.error.get_or_insert(format!("{what}: {error}"));
+                found.error = Some(format!("get_cryptarchia_info: {error}"));
+                status.node = Some(found);
+                return status;
             }
         }
+        for method in [
+            "get_network_info",
+            "get_time_info",
+            "pow_status",
+            "wallet_get_claimable_vouchers",
+        ] {
+            let result = call(&program, method, &[]).await;
+            let slot = match method {
+                "get_network_info" => &mut found.network,
+                "get_time_info" => &mut found.time,
+                "pow_status" => &mut found.pow,
+                _ => &mut found.vouchers,
+            };
+            match result {
+                Ok(value) => *slot = Some(value),
+                Err(error) => {
+                    found.error.get_or_insert(format!("{method}: {error}"));
+                }
+            }
+        }
+        node = Some(found);
+        addresses = Some(call(&program, "wallet_get_known_addresses", &[]).await);
     }
     status.node = node;
 
@@ -407,21 +426,14 @@ pub async fn gather(config: Option<PathBuf>) -> L1Status {
                 .filter_map(Value::as_str)
                 .map(str::to_owned)
                 .collect();
-            let mut balances = JoinSet::new();
-            for (index, address) in addresses.iter().enumerate() {
-                let (program, address) = (program.clone(), address.clone());
-                balances.spawn(async move {
-                    (index, call(&program, "wallet_get_balance", &[&address]).await)
-                });
-            }
-            let mut found = vec![Err("no answer".to_owned()); addresses.len()];
-            while let Some(joined) = balances.join_next().await {
-                if let Ok((index, result)) = joined {
-                    found[index] = result.map(|value| match value {
+            let mut found = Vec::with_capacity(addresses.len());
+            for address in &addresses {
+                found.push(call(&program, "wallet_get_balance", &[address]).await.map(|value| {
+                    match value {
                         Value::String(text) => text,
                         other => other.to_string(),
-                    });
-                }
+                    }
+                }));
             }
             status.wallets = addresses
                 .into_iter()
@@ -435,6 +447,324 @@ pub async fn gather(config: Option<PathBuf>) -> L1Status {
         }
     }
     status
+}
+
+// ---- Starting and stopping ----
+
+/// The node is up: the module answers `get_cryptarchia_info`.
+async fn node_started(program: &Path) -> bool {
+    call(program, "get_cryptarchia_info", &[]).await.is_ok()
+}
+
+async fn daemon_running(program: &Path) -> bool {
+    logosctl(program, &["status"])
+        .await
+        .is_ok_and(|value| parse_status(&value).0.status == "running")
+}
+
+async fn module_loaded(program: &Path) -> bool {
+    logosctl(program, &["status"]).await.is_ok_and(|value| {
+        parse_status(&value)
+            .1
+            .iter()
+            .any(|module| module.name == MODULE && module.status == "loaded")
+    })
+}
+
+/// A job's logosctl command: shown as `$ label`, its output in the job's log. Like every
+/// logosctl client here it's never killed (see [`TIMEOUT`]); after `wait` prog-tui stops waiting.
+/// Returns whether it succeeded, and its stdout.
+async fn run(
+    ctx: &mut Ctx,
+    label: &str,
+    program: &Path,
+    args: &[&str],
+    wait: Duration,
+) -> anyhow::Result<(bool, String)> {
+    ctx.log(format!("$ {label}"));
+    let output = tokio::time::timeout(wait, client(program, args).output())
+        .await
+        .map_err(|_| anyhow!("`{label}` took over {}s (left running)", wait.as_secs()))?
+        .with_context(|| format!("couldn't run `{label}`"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    for line in stdout.lines().chain(String::from_utf8_lossy(&output.stderr).lines()) {
+        if !line.trim().is_empty() {
+            ctx.log(line.to_owned());
+        }
+    }
+    Ok((output.status.success(), stdout))
+}
+
+/// Starts what isn't running yet: the logosctl daemon (detached), then `blockchain_module`, then
+/// the node with `config` and the deployment the module ships with.
+pub async fn start(ctx: &mut Ctx, config: Option<PathBuf>) -> anyhow::Result<()> {
+    let program = logosctl_path().ok_or_else(|| anyhow!("logosctl isn't on PATH"))?;
+    if daemon_running(&program).await {
+        ctx.log("L1: the logosctl daemon is already running");
+    } else {
+        // The detached daemon keeps whatever it inherits open, so its output goes to a file:
+        // a pipe would never close, and the job would never end.
+        let log = ctx.state_dir.join("logs").join("l1-daemon.log");
+        let file = std::fs::File::create(&log).context("creating the daemon's log")?;
+        let mut start = client(&program, &["daemon", "start", "--detach"]);
+        start.stdout(file.try_clone()?).stderr(file);
+        ctx.log(format!("$ logosctl daemon start --detach   (output in {})", log.display()));
+        let status = tokio::time::timeout(Duration::from_secs(60), start.status())
+            .await
+            .map_err(|_| anyhow!("logosctl daemon start --detach took over 60s"))??;
+        if !status.success() {
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            bail!("logosctl daemon start failed ({status}): {}", first_line(&text).unwrap_or(""));
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while !daemon_running(&program).await {
+            if tokio::time::Instant::now() > deadline {
+                bail!("the daemon started but doesn't answer `logosctl status`");
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        ctx.log("✓ L1: daemon running");
+    }
+
+    if module_loaded(&program).await {
+        ctx.log(format!("L1: {MODULE} is already loaded"));
+    } else {
+        let label = format!("logosctl module load {MODULE}");
+        let (ok, _) = run(ctx, &label, &program, &["module", "load", MODULE], TIMEOUT).await?;
+        if !ok || !module_loaded(&program).await {
+            bail!(
+                "{MODULE} didn't load. Is it installed in this session? \
+                 logosctl package install ./blockchain_module-<version>.lgx"
+            );
+        }
+    }
+
+    if node_started(&program).await {
+        ctx.log("L1: the node is already running");
+        return Ok(());
+    }
+    let config = config
+        .filter(|path| path.is_file())
+        .ok_or_else(|| anyhow!("no L1 config file: set it with C on the L1 view"))?;
+    let config_text = config.display().to_string();
+    let (config_arg, deployment) = (text_arg(&config_text), text_arg(""));
+    let label = format!("logosctl call {MODULE} start {config_arg} {deployment}");
+    let args = ["call", MODULE, "start", config_arg.as_str(), deployment.as_str()];
+    let (_, out) = run(ctx, &label, &program, &args, Duration::from_secs(120)).await?;
+    let reply: Value = serde_json::from_str(out.trim())
+        .map_err(|_| anyhow!("logosctl's reply isn't JSON: {}", first_line(&out).unwrap_or("")))?;
+    if let Some(error) = top_level_error(&reply) {
+        bail!("the node didn't start: {error}");
+    }
+    call_value(&reply).map_err(|error| anyhow!("the node didn't start: {error}"))?;
+    // A bootstrapping node answers slowly, so the job ends here; the L1 view shows it syncing.
+    ctx.log("✓ L1: node started; it syncs from its peers (mode Bootstrapping, then Online)");
+    Ok(())
+}
+
+/// Stops the node (`blockchain_module stop`), then the logosctl daemon.
+pub async fn stop(ctx: &mut Ctx) -> anyhow::Result<()> {
+    let program = logosctl_path().ok_or_else(|| anyhow!("logosctl isn't on PATH"))?;
+    if !daemon_running(&program).await {
+        ctx.log("L1: the daemon isn't running");
+        return Ok(());
+    }
+    if module_loaded(&program).await {
+        let label = format!("logosctl call {MODULE} stop");
+        run(ctx, &label, &program, &["call", MODULE, "stop"], Duration::from_secs(120)).await?;
+    }
+    run(ctx, "logosctl daemon stop", &program, &["daemon", "stop"], Duration::from_secs(60)).await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while daemon_running(&program).await {
+        if tokio::time::Instant::now() > deadline {
+            bail!("the daemon still answers 30s after `logosctl daemon stop`");
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    ctx.log("✓ L1: node and daemon stopped");
+    Ok(())
+}
+
+// ---- Bridging L1 funds into LEZ ----
+
+/// A bridge deposit as asked for: L1 funds from `from` to the LEZ account `to`, through the
+/// network's channel.
+#[derive(Clone, Debug)]
+pub struct BridgeRequest {
+    /// The L1 address (a public key, hex) that pays.
+    pub from: String,
+    /// The LEZ account credited, base58.
+    pub to: String,
+    pub amount: u64,
+    /// The LEZ network's channel on the L1, hex.
+    pub channel: String,
+}
+
+/// A planned deposit: `channel_deposit(channel, from, amount, metadata, tip)`.
+#[derive(Clone, Debug)]
+pub struct BridgeCall {
+    pub request: BridgeRequest,
+    /// The LEZ account's public key, hex.
+    pub pk: String,
+    /// `borsh(DepositMetadata { recipient: Identified(Key(pk)) })`, hex.
+    pub metadata: String,
+}
+
+impl BridgeCall {
+    pub fn args(&self) -> Vec<String> {
+        let request = &self.request;
+        vec![
+            "call".into(),
+            MODULE.into(),
+            "channel_deposit".into(),
+            text_arg(&request.channel),
+            text_arg(&request.from),
+            // The module's `amount` is text; a bare `1` would go as a number.
+            text_arg(&request.amount.to_string()),
+            text_arg(&self.metadata),
+            // No tip.
+            text_arg(""),
+        ]
+    }
+
+    pub fn command_line(&self) -> String {
+        let args: Vec<String> = self
+            .args()
+            .into_iter()
+            .map(|arg| if arg.contains([' ', '"', '\'']) { format!("'{arg}'") } else { arg })
+            .collect();
+        format!("logosctl {}", args.join(" "))
+    }
+}
+
+fn is_hex32(text: &str) -> bool {
+    text.len() == 64 && text.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// A deposit's metadata for a key-held LEZ account, as LEZ's bridge reads it
+/// (`bridge_core::DepositMetadata`): tag 1 (`Identified`), evidence tag 0 (`Key`), the public key.
+pub fn deposit_metadata(pk: &str) -> anyhow::Result<String> {
+    let pk = pk.trim().to_ascii_lowercase();
+    if !is_hex32(&pk) {
+        bail!("a LEZ public key is 32 bytes of hex, not {pk:?}");
+    }
+    Ok(format!("0100{pk}"))
+}
+
+/// The `pk <hex>` line of `wallet account get --keys`.
+pub fn parse_pk(output: &str) -> Option<String> {
+    output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("pk "))
+        .map(|pk| pk.trim().to_ascii_lowercase())
+}
+
+/// Checks a deposit and works out its metadata from the LEZ account's public key, then shows the
+/// plan; Enter on it sends.
+pub async fn plan_bridge(ctx: &mut Ctx, request: BridgeRequest) -> anyhow::Result<()> {
+    let program = logosctl_path().ok_or_else(|| anyhow!("logosctl isn't on PATH"))?;
+    let channel = request.channel.trim().trim_start_matches("0x").to_ascii_lowercase();
+    if !is_hex32(&channel) {
+        bail!("the channel id is 32 bytes of hex, not {:?}", request.channel);
+    }
+    let from = request.from.trim().to_ascii_lowercase();
+    if !is_hex32(&from) {
+        bail!("the L1 address is 32 bytes of hex, not {:?}", request.from);
+    }
+    let request = BridgeRequest { from, channel, ..request };
+
+    let keys = ctx.wallet(&["account", "get", "--keys", "-a", &format!("Public/{}", request.to)]);
+    let output = ctx.run_quiet("wallet account get --keys", keys).await?;
+    let pk = parse_pk(&output.out).ok_or_else(|| {
+        anyhow!(
+            "the LEZ wallet gave no public key for {}: is it a public account in this wallet?",
+            request.to
+        )
+    })?;
+    let metadata = deposit_metadata(&pk)?;
+
+    let l1_balance = call(&program, "wallet_get_balance", &[&request.from])
+        .await
+        .map_err(|error| anyhow!("the L1 address {}: {error}", jobs::short(&request.from)))?;
+    let l1_balance = match l1_balance {
+        Value::String(text) => text,
+        other => other.to_string(),
+    };
+    let lez_balance = ctx.rpc.account(&request.to).await?.map(|view| view.balance());
+    let channel_state = call(&program, "get_channel_state", &[&request.channel]).await;
+
+    let call = BridgeCall { request, pk, metadata };
+    let request = &call.request;
+    let mut lines = vec![
+        format!("from L1     {}  (balance {l1_balance})", request.from),
+        format!("to LEZ      Public/{}  (balance {})", request.to, lez_balance.map_or("not on chain yet".to_owned(), |b| b.to_string())),
+        format!("  its pk    {}", call.pk),
+        format!("amount      {}", request.amount),
+        format!("channel     {}  ({})", request.channel, ctx.network.label()),
+        format!("metadata    {}  (Identified, Key, pk)", call.metadata),
+        String::new(),
+    ];
+    match &channel_state {
+        Ok(state) => {
+            let text = state.to_string();
+            let shown: String = text.chars().take(200).collect();
+            lines.push(format!("channel on L1: {shown}{}", if text.len() > 200 { "…" } else { "" }));
+        }
+        Err(error) => lines.push(format!("✗ channel on L1: {error}")),
+    }
+    let enough = l1_balance.parse::<u128>().is_ok_and(|b| b >= u128::from(request.amount));
+    if !enough {
+        lines.push(format!("✗ the L1 address holds {l1_balance}, less than {}", request.amount));
+    }
+    lines.push(String::new());
+    lines.push(format!("$ {}", call.command_line()));
+    lines.push(String::new());
+    lines.push(
+        "The sequencer credits the LEZ account once it sees the deposit on L1. Enter sends, then \
+         watches the LEZ balance for up to 3 minutes."
+            .to_owned(),
+    );
+    ctx.send(Msg::Plan {
+        title: format!("bridge {} → {}", request.amount, jobs::short(&request.to)),
+        lines,
+        call: enough.then(|| Planned::Bridge(call.clone())),
+    });
+    Ok(())
+}
+
+/// Sends the deposit, then watches the LEZ account's balance.
+pub async fn bridge(ctx: &mut Ctx, call: &BridgeCall) -> anyhow::Result<()> {
+    let program = logosctl_path().ok_or_else(|| anyhow!("logosctl isn't on PATH"))?;
+    let to = call.request.to.clone();
+    let before = ctx.rpc.account(&to).await?.map_or(0, |view| view.balance());
+    let args = call.args();
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (_, out) = run(ctx, &call.command_line(), &program, &args, Duration::from_secs(120)).await?;
+    let reply: Value = serde_json::from_str(out.trim())
+        .map_err(|_| anyhow!("logosctl's reply isn't JSON: {}", first_line(&out).unwrap_or("")))?;
+    if let Some(error) = top_level_error(&reply) {
+        bail!("{error}");
+    }
+    let sent = call_value(&reply).map_err(|error| anyhow!("channel_deposit: {error}"))?;
+    ctx.log(format!("✓ deposit submitted on L1: {sent}"));
+
+    ctx.log(format!("watching Public/{} (balance {before})", jobs::short(&to)));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+    loop {
+        let now = ctx.rpc.account(&to).await?.map_or(0, |view| view.balance());
+        if now > before {
+            ctx.log(format!("✓ credited on LEZ: {before} → {now} (+{})", now - before));
+            return Ok(());
+        }
+        if tokio::time::Instant::now() > deadline {
+            ctx.log(
+                "not credited within 3 minutes. The sequencer mints a deposit once it sees it on \
+                 L1, at the latest when L1 finalises it; the Accounts pane will show the balance.",
+            );
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
 }
 
 /// `show_config <path>`: the node's config as the module reads it, secrets shown as `<secret>`.
@@ -516,6 +846,31 @@ mod tests {
         assert_eq!(names.get("82da47").map(String::as_str), Some("PoWClaim"));
         assert_eq!(names.get("ae88").map(String::as_str), Some("Stake"));
         assert_eq!(names.len(), 2, "nothing from secret_keys");
+    }
+
+    #[test]
+    fn builds_deposit_metadata_like_lezs_bridge() {
+        let pk = "1ea4a67bf2daadba6192c64a9324accb347050f1d4d29d8a28ceb3226bc85be4";
+        // bridge_core's test: [1, 0] ++ key bytes.
+        assert_eq!(deposit_metadata(pk).unwrap(), format!("0100{pk}"));
+        assert!(deposit_metadata("12").is_err());
+        assert_eq!(parse_pk(&format!("Balance 0, nonce 0\npk {pk}\n")).as_deref(), Some(pk));
+        assert_eq!(parse_pk("Balance 0"), None);
+
+        let call = BridgeCall {
+            request: BridgeRequest {
+                from: "82da".into(),
+                to: "2bMv".into(),
+                amount: 5,
+                channel: "d616".into(),
+            },
+            pk: pk.into(),
+            metadata: deposit_metadata(pk).unwrap(),
+        };
+        assert_eq!(call.args()[2..6], ["channel_deposit", "str:d616", "str:82da", "str:5"], "text, not numbers");
+        assert_eq!(call.args()[6], format!("str:0100{pk}"));
+        assert!(call.command_line().ends_with(" str:"), "no tip");
+        assert!(call.command_line().contains(" str:5 "));
     }
 
     #[test]
