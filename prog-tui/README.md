@@ -73,6 +73,7 @@ Keep LEZ at the tag lez-programs pins (`v0.4.0-rc3` today), and spel on its `ref
 ## Layout
 
 - **Status bar:**
+  - **Tabs:** `[1 LEZ] [2 L1 ●]`, the shown view highlighted. The dot is the L1 node: ● running with `blockchain_module` loaded, ◐ the daemon runs without it, ○ not running, `-` no `logosctl` on PATH.
   - **LEZ:** the checkout's branch, commit and whether it's dirty.
   - **PROGS:** the same for lez-programs, then whether `spel`, `lez-call` and `lez-dryrun` are built.
   - **SEQ:** the local sequencer (stopped, starting, or running; started by prog-tui or not; block height), and `PAYER` / `ACCOUNT`. On a remote network, **NET** instead: the network's name, whether its sequencer is reachable, its block height and URL, and `channel ✓` when its channel matches `networks.json`.
@@ -105,8 +106,28 @@ Keep LEZ at the tag lez-programs pins (`v0.4.0-rc3` today), and spel on its `ref
 | `e` | Print shell commands for the sequencer (watch its log, use it, stop it) and the `source` line for `env.sh` |
 | `L` | Change the LEZ and lez-programs checkouts |
 | `N` | Back to the network selector |
+| `1` / `2` | The LEZ view (everything above) / the L1 view (below) |
 | `Tab`, `↑↓`/`jk` | Switch pane, select |
 | `?` / `q` | Help / quit |
+
+## The L1 view
+
+`2` shows the Logos blockchain node (the L1) that the `logosctl` daemon runs as `blockchain_module`. Its data comes from running `logosctl --json …` (from PATH; `LOGOSCTL_CONFIG_DIR` is honoured, as logosctl itself does). It refreshes every 5s while shown and every 30s otherwise, for the tab's dot. It only reads: it never starts, stops or changes the node. The L1 is the same whichever LEZ network you chose.
+
+- **L1 daemon:** logosctl's path and session directory, the daemon's state, pid and version, and each module's state, version, uptime, memory and CPU. When the daemon or the module isn't running, it shows the commands to start them.
+- **L1 node:** sync mode (`Online` once synced), height, slot and LIB slot, tip, peers, epoch and genesis, mining and auto-claim, claimable vouchers. Then the config file, and the selected wallet's full address.
+- **L1 wallets:** each address in `wallet_get_known_addresses` with its `wallet_get_balance`, and their total. Each address is named by its key in the `public_keys:` block of the `keystore.yaml` beside the config (`PoWClaim`, `Stake`, …). Only that block is read; the secret keys are not. Keys the wallet tracks no funds for (the node answers `Unknown wallet address.`) show as `no funds key`.
+
+logosctl can't say which config the node was started with, so prog-tui keeps it as a setting. `C` sets it; empty means the one Basecamp's blockchain UI last used (`userConfigPath` in `~/.config/Logos/BlockchainUI.conf`). It's shared by every network, like the checkouts. `c` shows it through the module's `show_config`, with secrets as `<secret>`.
+
+Running the node yourself:
+
+```sh
+logosctl daemon start --detach
+logosctl package install ./blockchain_module-<version>.lgx
+logosctl module load blockchain_module
+logosctl call blockchain_module start <user_config.yaml> ""   # "": the deployment the module ships with
+```
 
 ## Calling with spel
 

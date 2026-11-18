@@ -2,7 +2,7 @@
 name = "prog-tui"
 version = "0.1.0"
 edition = "2024"
-description = "Terminal UI for deploying and testing the LEZ example programs locally"
+description = "Terminal UI for deploying and testing LEZ programs, with a view of the L1 node run by logosctl"
 publish = false
 
 [dependencies]

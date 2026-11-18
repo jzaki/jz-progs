@@ -68,6 +68,9 @@ pub struct Saved {
     /// The network chosen last time (`Network::key`), which the selector starts on. Only the root
     /// state's counts.
     pub last_network: Option<String>,
+    /// The L1 node's config (`user_config.yaml`), as entered. logosctl can't say which one the node
+    /// was started with, so the L1 view uses this one. Empty: Basecamp's, when it has one.
+    pub l1_config: String,
 }
 
 impl Default for Saved {
@@ -81,6 +84,7 @@ impl Default for Saved {
             deployments: Vec::new(),
             watched: Vec::new(),
             last_network: None,
+            l1_config: String::new(),
         }
     }
 }
@@ -104,13 +108,14 @@ impl Saved {
         Ok(())
     }
 
-    /// Takes the settings every network shares from `root` (the root state's): the checkouts and
-    /// the wallet password. The rest (`PAYER`, `ACCOUNT`, deployments, watched accounts) belongs
+    /// Takes the settings every network shares from `root` (the root state's): the checkouts, the
+    /// wallet password and the L1 config. The rest (`PAYER`, `ACCOUNT`, deployments, watched accounts) belongs
     /// to one chain.
     pub fn share_settings_from(&mut self, root: &Saved) {
         self.lez_dir.clone_from(&root.lez_dir);
         self.programs_dir.clone_from(&root.programs_dir);
         self.wallet_password.clone_from(&root.wallet_password);
+        self.l1_config.clone_from(&root.l1_config);
     }
 
     pub fn program_name(&self, program_id: &str) -> Option<&str> {

@@ -9,8 +9,9 @@ use ratatui::{
 };
 
 use crate::{
-    app::{AccountRow, App, Focus, Modal},
+    app::{AccountRow, App, Focus, Modal, View},
     jobs::{StepState, short},
+    l1::{L1Status, MODULE},
     network::{NETWORKS_FILE, Network},
     rpc::{NATIVE_TOKEN, describe_bytes, format_balance},
     state::Origin,
@@ -28,15 +29,24 @@ pub fn draw(frame: &mut Frame, app: &App) {
     .areas(frame.area());
     draw_status(frame, top, app);
 
-    let [accounts, detail, programs] = Layout::horizontal([
+    let [left, middle, right] = Layout::horizontal([
         Constraint::Percentage(30),
         Constraint::Percentage(40),
         Constraint::Percentage(30),
     ])
     .areas(main);
-    draw_accounts(frame, accounts, app);
-    draw_detail(frame, detail, app);
-    draw_programs(frame, programs, app);
+    match app.view {
+        View::Lez => {
+            draw_accounts(frame, left, app);
+            draw_detail(frame, middle, app);
+            draw_programs(frame, right, app);
+        }
+        View::L1 => {
+            draw_l1_daemon(frame, left, app);
+            draw_l1_node(frame, middle, app);
+            draw_l1_wallets(frame, right, app);
+        }
+    }
 
     if app.checklist.is_empty() {
         draw_log(frame, bottom, app);
@@ -98,13 +108,18 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 .collect();
             let keys = if scrolls { " · ↑↓ PgUp/PgDn scroll" } else { "" };
             let (footer, color) = match &view.call {
+                None if view.read_only => (format!(" read-only · Esc closes{keys} "), Color::Cyan),
                 Some(call) => (format!(" Enter send ({}) · Esc cancel{keys} ", call.sender()), Color::Yellow),
                 None => (format!(" nothing to send (see above) · Esc closes{keys} "), Color::Red),
             };
             frame.render_widget(
                 Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((scroll, 0)).block(
                     Block::bordered()
-                        .title(format!(" {}: plan ", view.title))
+                        .title(if view.read_only {
+                            format!(" {} ", view.title)
+                        } else {
+                            format!(" {}: plan ", view.title)
+                        })
                         .title_bottom(footer)
                         .border_style(color),
                 ),
@@ -218,9 +233,41 @@ fn pane(title: &str, focused: bool) -> Block<'_> {
     }
 }
 
+/// `[1 LEZ] [2 L1 ●]`: the views, the shown one highlighted, and the L1 daemon's state.
+fn tabs(app: &App) -> Vec<Span<'static>> {
+    let tab = |label: &'static str, shown: bool| {
+        if shown {
+            Span::raw(label).black().on_cyan()
+        } else {
+            Span::raw(label).dark_gray()
+        }
+    };
+    let l1 = &app.l1;
+    let dot = if !l1.checked {
+        Span::raw(" ·").dark_gray()
+    } else if l1.logosctl.is_none() {
+        Span::raw(" -").dark_gray()
+    } else if l1.running() && l1.module_loaded() {
+        Span::raw(" ●").green()
+    } else if l1.running() {
+        Span::raw(" ◐").yellow()
+    } else {
+        Span::raw(" ○").red()
+    };
+    vec![
+        tab("[1 LEZ]", app.view == View::Lez),
+        Span::raw(" "),
+        tab("[2 L1", app.view == View::L1),
+        dot,
+        tab("]", app.view == View::L1),
+        Span::raw("  "),
+    ]
+}
+
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     let repo = &app.status.repo;
-    let mut lez = vec![Span::raw("LEZ ").bold(), Span::raw(app.saved.lez_dir.clone())];
+    let mut lez = tabs(app);
+    lez.extend([Span::raw("LEZ ").bold(), Span::raw(app.saved.lez_dir.clone())]);
     if repo.present {
         lez.push(Span::raw("  "));
         lez.push(Span::raw(repo.branch.clone().unwrap_or_else(|| "(detached)".into())).green());
@@ -671,6 +718,16 @@ fn draw_checklist(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_keys(frame: &mut Frame, area: Rect, app: &App) {
+    if app.view == View::L1 {
+        frame.render_widget(
+            Paragraph::new(
+                " j/k wallet · c config · C config path · g refresh │ 1 LEZ · 2 L1 · N network · ? help · q quit",
+            )
+            .dark_gray(),
+            area,
+        );
+        return;
+    }
     let context = match app.focus {
         Focus::Accounts => "P payer · A account · n new · t transfer · w watch · x forget watched",
         Focus::Guests => "v messages · d deploy · u build+deploy an example_progs file",
@@ -679,7 +736,7 @@ fn draw_keys(frame: &mut Frame, area: Rect, app: &App) {
     };
     frame.render_widget(
         Paragraph::new(format!(
-            " {context} │ W walkthrough · s seq start/stop · e seq cmds · R reset · b build · i wallet init · N network · Tab pane · ? help · q quit"
+            " {context} │ W walkthrough · s seq start/stop · e seq cmds · R reset · b build · i wallet init │ 1 LEZ · 2 L1 · N network · Tab pane · ? help · q quit"
         ))
         .dark_gray(),
         area,
@@ -707,6 +764,8 @@ fn draw_help(frame: &mut Frame) {
         ("L", "change the LEZ and lez-programs checkouts"),
         ("N", "back to the network selector: local standalone, or one from networks.json"),
         ("g", "refresh now"),
+        ("1 / 2", "the LEZ view / the L1 view: the logosctl daemon, the node and its wallets (read-only)"),
+        ("L1: c / C", "show the node's config (secrets hidden) / set which config file the node uses"),
         ("Tab / ←→", "switch pane (Accounts, Guests, Deployed, Built-in); ↑↓ or j/k select"),
         ("q", "quit (the sequencer keeps running)"),
     ];
@@ -786,4 +845,257 @@ pub fn draw_selector(frame: &mut Frame, choices: &[Network], selected: usize, er
         &mut ListState::default().with_selected(Some(selected)),
     );
     frame.render_widget(Paragraph::new(notes).wrap(Wrap { trim: false }), notes_area);
+}
+
+// ---- The L1 view ----
+
+fn uptime(seconds: u64) -> String {
+    match seconds {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3600 => format!("{}m{:02}s", s / 60, s % 60),
+        s if s < 86_400 => format!("{}h{:02}m", s / 3600, (s % 3600) / 60),
+        s => format!("{}d{:02}h", s / 86_400, (s % 86_400) / 3600),
+    }
+}
+
+/// A field of one of the node's reports, as text: `-` when it's missing.
+fn field(value: Option<&serde_json::Value>, key: &str) -> String {
+    match value.and_then(|value| value.get(key)) {
+        Some(serde_json::Value::String(text)) => text.clone(),
+        Some(serde_json::Value::Null) | None => "-".to_owned(),
+        Some(other) => other.to_string(),
+    }
+}
+
+fn start_hint(lines: &mut Vec<Line<'static>>, l1: &L1Status, config: Option<&std::path::Path>) {
+    lines.push(Line::default());
+    lines.push(Line::from("to run the node yourself:").dark_gray());
+    let config = config.map_or("<user_config.yaml>".to_owned(), |path| path.display().to_string());
+    let mut commands = Vec::new();
+    if !l1.running() {
+        commands.push("logosctl daemon start --detach".to_owned());
+    }
+    if !l1.module_loaded() {
+        commands.push(format!("logosctl module load {MODULE}"));
+    }
+    commands.push(format!("logosctl call {MODULE} start {config} \"\""));
+    for command in commands {
+        lines.push(Line::from(format!("  {command}")).cyan());
+    }
+}
+
+fn draw_l1_daemon(frame: &mut Frame, area: Rect, app: &App) {
+    let l1 = &app.l1;
+    let mut lines: Vec<Line> = Vec::new();
+    if !l1.checked {
+        lines.push(Line::from("asking logosctl…").dark_gray());
+    } else if let Some(program) = &l1.logosctl {
+        lines.push(Line::from(vec![
+            Span::raw("logosctl ").dark_gray(),
+            Span::raw(program.display().to_string()),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("session  ").dark_gray(),
+            Span::raw(l1.config_dir.display().to_string()),
+        ]));
+        lines.push(Line::default());
+        match &l1.daemon {
+            Some(Ok(daemon)) => {
+                let state = Span::raw(daemon.status.clone());
+                lines.push(Line::from(vec![
+                    Span::raw("daemon ").bold(),
+                    if daemon.status == "running" { state.green() } else { state.yellow() },
+                    Span::raw(format!(
+                        "{}{}",
+                        daemon.pid.map(|pid| format!(" · pid {pid}")).unwrap_or_default(),
+                        daemon.version.as_deref().map(|v| format!(" · v{v}")).unwrap_or_default(),
+                    ))
+                    .dark_gray(),
+                ]));
+            }
+            Some(Err(error)) => {
+                lines.push(Line::from(vec![Span::raw("daemon ").bold(), Span::raw("not answering").red()]));
+                lines.push(Line::from(error.clone()).dark_gray());
+            }
+            None => {}
+        }
+        if !l1.modules.is_empty() {
+            lines.push(Line::default());
+            lines.push(Line::from("modules").bold());
+        }
+        for module in &l1.modules {
+            let state = Span::raw(format!(" {}", module.status));
+            let mut spans = vec![
+                Span::raw(format!("  {}", module.name)).fg(if module.name == MODULE {
+                    Color::Cyan
+                } else {
+                    Color::Reset
+                }),
+                if module.status == "loaded" { state.green() } else { state.yellow() },
+            ];
+            let mut meta = Vec::new();
+            if !module.version.is_empty() {
+                meta.push(format!("v{}", module.version));
+            }
+            if let Some(seconds) = module.uptime_seconds {
+                meta.push(format!("up {}", uptime(seconds)));
+            }
+            if let Some(memory) = module.memory_mb {
+                meta.push(format!("{memory:.0} MB"));
+            }
+            if let Some(cpu) = module.cpu_percent {
+                meta.push(format!("{cpu:.1}% cpu"));
+            }
+            spans.push(Span::raw(format!(" {}", meta.join(" · "))).dark_gray());
+            lines.push(Line::from(spans));
+        }
+        if !l1.running() || !l1.module_loaded() {
+            start_hint(&mut lines, l1, app.l1_config().as_deref());
+        }
+    } else {
+        lines.push(Line::from("logosctl isn't on PATH").red());
+        lines.push(
+            Line::from("Install Logos Core's CLI and put it on PATH; this view runs it.").dark_gray(),
+        );
+        start_hint(&mut lines, l1, app.l1_config().as_deref());
+    }
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(pane("L1 daemon (logosctl)", false)),
+        area,
+    );
+}
+
+fn draw_l1_node(frame: &mut Frame, area: Rect, app: &App) {
+    let l1 = &app.l1;
+    let mut lines: Vec<Line> = Vec::new();
+    let label = |text: &'static str| Span::raw(format!("{text:<10}")).dark_gray();
+    match &l1.node {
+        None if !l1.checked => lines.push(Line::from("…").dark_gray()),
+        None => lines.push(Line::from(format!("{MODULE} isn't loaded")).dark_gray()),
+        Some(node) => {
+            let chain = node.chain.as_ref();
+            let mode = field(chain, "mode");
+            let mode_span = Span::raw(mode.clone());
+            lines.push(Line::from(vec![
+                label("mode"),
+                if mode == "Online" { mode_span.green() } else { mode_span.yellow() },
+            ]));
+            lines.push(Line::from(vec![label("height"), Span::raw(field(chain, "height"))]));
+            lines.push(Line::from(vec![
+                label("slot"),
+                Span::raw(field(chain, "slot")),
+                Span::raw(format!("  lib slot {}", field(chain, "lib_slot"))).dark_gray(),
+            ]));
+            let tip = field(chain, "tip");
+            lines.push(Line::from(vec![label("tip"), Span::raw(short(&tip))]));
+            let network = node.network.as_ref();
+            lines.push(Line::from(vec![
+                label("peers"),
+                Span::raw(field(network, "n_peers")),
+                Span::raw(format!("  connections {}", field(network, "n_connections"))).dark_gray(),
+            ]));
+            let time = node.time.as_ref();
+            lines.push(Line::from(vec![
+                label("epoch"),
+                Span::raw(field(time, "current_epoch")),
+                Span::raw(format!("  genesis {}", field(time, "genesis_time"))).dark_gray(),
+            ]));
+            let pow = node.pow.as_ref();
+            let armed = pow
+                .and_then(|pow| pow.get("auto_claim"))
+                .and_then(|claim| claim.get("is_armed"))
+                .map_or("-".to_owned(), ToString::to_string);
+            lines.push(Line::from(vec![
+                label("mining"),
+                Span::raw(field(pow, "is_mining")),
+                Span::raw(format!("  auto-claim {armed}")).dark_gray(),
+            ]));
+            let vouchers = node.vouchers.as_ref();
+            lines.push(Line::from(vec![
+                label("claimable"),
+                Span::raw(field(vouchers, "total_claimable")),
+                Span::raw(format!("  reward amount {}", field(vouchers, "reward_amount"))).dark_gray(),
+            ]));
+            if let Some(error) = &node.error {
+                lines.push(Line::from(format!("✗ {error}")).red());
+            }
+        }
+    }
+
+    lines.push(Line::default());
+    match app.l1_config() {
+        Some(path) => {
+            let exists = path.is_file();
+            lines.push(Line::from(vec![
+                label("config"),
+                Span::raw(path.display().to_string()).fg(if exists { Color::Reset } else { Color::Red }),
+            ]));
+            if !exists {
+                lines.push(Line::from("  no such file (C changes it)").red());
+            } else if app.saved.l1_config.trim().is_empty() {
+                lines.push(Line::from("  Basecamp's (C sets another) · c shows it").dark_gray());
+            } else {
+                lines.push(Line::from("  c shows it · C changes it").dark_gray());
+            }
+        }
+        None => lines.push(Line::from(vec![label("config"), Span::raw("not set (C sets it)").yellow()])),
+    }
+
+    if let Some(wallet) = l1.wallets.get(app.selected_l1_wallet) {
+        lines.push(Line::default());
+        lines.push(Line::from(wallet.name.clone().unwrap_or_else(|| "wallet".to_owned())).bold());
+        lines.push(Line::from(wallet.address.clone()));
+        match &wallet.balance {
+            Ok(balance) => lines.push(Line::from(format!("balance {balance}")).green()),
+            Err(_) if wallet.holds_no_funds() => lines.push(
+                Line::from("the wallet tracks no funds for this key (a blend, network or stake key)")
+                    .dark_gray(),
+            ),
+            Err(error) => lines.push(Line::from(format!("✗ {error}")).red()),
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(pane("L1 node", false)),
+        area,
+    );
+}
+
+fn draw_l1_wallets(frame: &mut Frame, area: Rect, app: &App) {
+    let l1 = &app.l1;
+    let width = l1
+        .wallets
+        .iter()
+        .map(|wallet| wallet.name.as_deref().map_or(0, str::len))
+        .max()
+        .unwrap_or(0);
+    let items: Vec<ListItem> = l1
+        .wallets
+        .iter()
+        .map(|wallet| {
+            let name = wallet.name.clone().unwrap_or_default();
+            let mut spans = vec![
+                Span::raw(format!("{name:<width$} ")).magenta(),
+                Span::raw(short(&wallet.address)),
+            ];
+            spans.push(match &wallet.balance {
+                Ok(balance) => Span::raw(format!(" {balance}")).green(),
+                Err(_) if wallet.holds_no_funds() => Span::raw(" no funds key").dark_gray(),
+                Err(_) => Span::raw(" ✗").red(),
+            });
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    let title = match (l1.total(), &l1.wallets_error) {
+        (_, Some(error)) => format!("L1 wallets: ✗ {error}"),
+        (Some(total), None) => format!("L1 wallets · total {total}"),
+        (None, None) if l1.node.is_none() => "L1 wallets".to_owned(),
+        (None, None) => "L1 wallets · no balances".to_owned(),
+    };
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(pane(&title, true))
+            .highlight_style(Style::new().add_modifier(Modifier::REVERSED)),
+        area,
+        &mut ListState::default().with_selected(Some(app.selected_l1_wallet)),
+    );
 }

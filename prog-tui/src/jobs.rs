@@ -77,6 +77,10 @@ pub enum Msg {
     ChainReset,
     Checklist(Vec<String>),
     Step(usize, StepState),
+    /// The L1 node, its daemon and wallets, from logosctl.
+    L1(crate::l1::L1Status),
+    /// The L1 node's config, from `show_config`, or why it couldn't be read.
+    L1Config(PathBuf, Result<String, String>),
 }
 
 /// What a job gets: the checkouts, the RPC, a channel to the UI, and its own log file.

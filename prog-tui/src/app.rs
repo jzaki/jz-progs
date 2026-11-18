@@ -14,6 +14,7 @@ use tokio::{runtime::Handle, sync::mpsc::UnboundedSender};
 use crate::{
     builtin::{self, Builtin},
     jobs::{self, CallRequest, Ctx, Msg, Planned, Status, StepState},
+    l1::{self, L1Status},
     lez::Lez,
     lez_call::{self, Method, Seed},
     network::Network,
@@ -28,6 +29,13 @@ use crate::{
 };
 
 const LOG_LINES: usize = 2000;
+
+/// The two screens: LEZ (accounts, programs, calls) and the L1 node run by logosctl.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum View {
+    Lez,
+    L1,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
@@ -69,6 +77,8 @@ pub enum FormAction {
     BuildDeploy,
     /// The checkouts: fields `LEZ`, `lez-programs`.
     Dirs,
+    /// The L1 node's config: field `config`.
+    L1Config,
     /// Watch an account outside the wallet: fields `id`, `note`.
     Watch,
     /// Plan one message: fields `to`, one per param, then `sign`, `actors` and `pda seeds`.
@@ -125,6 +135,8 @@ pub struct PlanView {
     pub call: Option<Planned>,
     /// The first line shown. The drawing clamps it to what fits, so it's a `Cell`.
     pub scroll: Cell<u16>,
+    /// Text to read, not a call: no "nothing to send".
+    pub read_only: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -174,6 +186,10 @@ pub struct App {
     /// in the Account pane instead of the raw bytes.
     pub decoded: BTreeMap<(String, String, Vec<u8>), String>,
     decoding: std::collections::BTreeSet<(String, String, Vec<u8>)>,
+    pub view: View,
+    /// The L1 node, its daemon and wallets, refreshed from logosctl.
+    pub l1: L1Status,
+    pub selected_l1_wallet: usize,
     pub focus: Focus,
     pub selected_account: usize,
     pub selected_guest: usize,
@@ -194,6 +210,7 @@ pub struct App {
     last_status: Option<Instant>,
     last_accounts: Option<Instant>,
     last_views: Option<Instant>,
+    last_l1: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -201,6 +218,7 @@ struct Refreshing {
     status: bool,
     accounts: bool,
     views: bool,
+    l1: bool,
 }
 
 impl App {
@@ -241,6 +259,9 @@ impl App {
             guests: Vec::new(),
             decoded: BTreeMap::new(),
             decoding: std::collections::BTreeSet::new(),
+            view: View::Lez,
+            l1: L1Status::default(),
+            selected_l1_wallet: 0,
             focus: Focus::Accounts,
             selected_account: 0,
             selected_guest: 0,
@@ -259,6 +280,7 @@ impl App {
             last_status: None,
             last_accounts: None,
             last_views: None,
+            last_l1: None,
         };
         app.guests = app.programs.guests();
         app.save();
@@ -309,6 +331,15 @@ impl App {
             self.network.label()
         ));
         false
+    }
+
+    /// The L1 node's config: the one set with `C`, else Basecamp's.
+    pub fn l1_config(&self) -> Option<PathBuf> {
+        let entered = Some(self.saved.l1_config.trim())
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .or_else(l1::basecamp_config)?;
+        Some(state::resolve_dir(&self.crate_dir, &entered))
     }
 
     pub fn push_log(&mut self, line: String) {
@@ -434,6 +465,17 @@ impl App {
 
         self.decode_selected();
 
+        // The L1 view refreshes often; otherwise only enough for the status bar's dot.
+        let every = if self.view == View::L1 { 5 } else { 30 };
+        if !self.refreshing.l1 && due(self.last_l1, every) {
+            self.refreshing.l1 = true;
+            self.last_l1 = Some(Instant::now());
+            let (config, tx) = (self.l1_config(), self.tx.clone());
+            self.rt.spawn(async move {
+                let _ = tx.send(Msg::L1(l1::gather(config).await));
+            });
+        }
+
         if self.status.seq.healthy && !self.refreshing.views && due(self.last_views, 3) {
             self.refreshing.views = true;
             self.last_views = Some(Instant::now());
@@ -513,6 +555,7 @@ impl App {
         self.last_status = None;
         self.last_accounts = None;
         self.last_views = None;
+        self.last_l1 = None;
     }
 
     pub fn on_msg(&mut self, msg: Msg) {
@@ -580,6 +623,27 @@ impl App {
                     lines,
                     call,
                     scroll: Cell::new(0),
+                    read_only: false,
+                });
+            }
+            Msg::L1(status) => {
+                self.refreshing.l1 = false;
+                self.l1 = status;
+                self.selected_l1_wallet = self
+                    .selected_l1_wallet
+                    .min(self.l1.wallets.len().saturating_sub(1));
+            }
+            Msg::L1Config(path, text) => {
+                let lines = match text {
+                    Ok(text) => text.lines().map(str::to_owned).collect(),
+                    Err(error) => vec![format!("✗ {error}")],
+                };
+                self.modal = Modal::Plan(PlanView {
+                    title: format!("L1 config {}", path.display()),
+                    lines,
+                    call: None,
+                    scroll: Cell::new(0),
+                    read_only: true,
                 });
             }
             Msg::Watch(id, note) => {
@@ -801,6 +865,24 @@ impl App {
     }
 
     fn on_main_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('1') => {
+                self.view = View::Lez;
+                return;
+            }
+            KeyCode::Char('2') => {
+                if self.view != View::L1 {
+                    self.view = View::L1;
+                    self.last_l1 = None;
+                }
+                return;
+            }
+            _ => {}
+        }
+        if self.view == View::L1 {
+            self.on_l1_key(key);
+            return;
+        }
         if self.focus == Focus::Builtin
             && matches!(key.code, KeyCode::Char('d' | 'c' | 'x'))
         {
@@ -951,6 +1033,58 @@ impl App {
                 self.push_log(format!("forgot {} {}", removed.name, removed.program_id));
                 self.save();
                 self.clamp_selection();
+            }
+            _ => {}
+        }
+    }
+
+    /// The L1 view's keys. It only reads, so the LEZ keys that act are refused here.
+    fn on_l1_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Char('N') | KeyCode::Char('?') => {
+                // The same as on the LEZ view.
+                self.view = View::Lez;
+                self.on_main_key(key);
+                self.view = View::L1;
+            }
+            KeyCode::Char('g') => {
+                self.last_l1 = None;
+                self.push_log("refreshing the L1".to_owned());
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.selected_l1_wallet = (self.selected_l1_wallet + 1)
+                    .min(self.l1.wallets.len().saturating_sub(1));
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.selected_l1_wallet = self.selected_l1_wallet.saturating_sub(1);
+            }
+            KeyCode::Char('C') => {
+                self.modal = Modal::Form(Form::new(
+                    "The L1 node's config (absolute, ~/…, or relative to prog-tui)".to_owned(),
+                    vec![(
+                        "config\nthe user_config.yaml the node was started with; empty: Basecamp's".to_owned(),
+                        self.saved.l1_config.clone(),
+                    )],
+                    FormAction::L1Config,
+                ));
+            }
+            KeyCode::Char('c') => {
+                let Some(config) = self.l1_config() else {
+                    self.push_log("✗ no L1 config set: C sets it".to_owned());
+                    return;
+                };
+                if !config.is_file() {
+                    self.push_log(format!("✗ no L1 config at {} (C changes it)", config.display()));
+                    return;
+                }
+                let tx = self.tx.clone();
+                self.rt.spawn(async move {
+                    let text = l1::show_config(&config).await;
+                    let _ = tx.send(Msg::L1Config(config, text));
+                });
+            }
+            KeyCode::Char(_) | KeyCode::Tab | KeyCode::BackTab => {
+                self.push_log("the L1 view only reads: 1 switches back to LEZ".to_owned());
             }
             _ => {}
         }
@@ -1343,6 +1477,16 @@ impl App {
                     self.programs.dir.display(),
                     missing(self.programs.present()),
                 ));
+            }
+            FormAction::L1Config => {
+                self.saved.l1_config.clone_from(&values[0]);
+                self.save();
+                self.last_l1 = None;
+                match self.l1_config() {
+                    Some(path) if path.is_file() => self.push_log(format!("L1 config {}", path.display())),
+                    Some(path) => self.push_log(format!("✗ no file at {}", path.display())),
+                    None => self.push_log("L1 config cleared, and Basecamp has none".to_owned()),
+                }
             }
             FormAction::Watch => {
                 let id = jobs::bare_account_id(&values[0]).to_owned();
