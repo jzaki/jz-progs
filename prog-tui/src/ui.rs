@@ -247,6 +247,8 @@ fn tabs(app: &App) -> Vec<Span<'static>> {
         Span::raw(" ·").dark_gray()
     } else if l1.logosctl.is_none() {
         Span::raw(" -").dark_gray()
+    } else if l1.running() && l1.module_loaded() && l1.node_log.as_ref().is_some_and(|log| !log.online) {
+        Span::raw(" ◐").yellow()
     } else if l1.running() && l1.module_loaded() {
         Span::raw(" ●").green()
     } else if l1.running() {
@@ -721,7 +723,7 @@ fn draw_keys(frame: &mut Frame, area: Rect, app: &App) {
     if app.view == View::L1 {
         frame.render_widget(
             Paragraph::new(
-                " s start/stop node · b bridge to LEZ · j/k wallet · c config · C config path · g refresh │ 1 LEZ · 2 L1 · N network · ? help · q quit",
+                " s start/stop node · b bridge to LEZ · t L1 transfer · j/k wallet · c config · C config path · g refresh │ 1 LEZ · 2 L1 · N network · ? help · q quit",
             )
             .dark_gray(),
             area,
@@ -767,6 +769,7 @@ fn draw_help(frame: &mut Frame) {
         ("1 / 2", "the LEZ view / the L1 view: the logosctl daemon, the node and its wallets (read-only)"),
         ("L1: s", "start the L1 node (daemon, module, node), or stop it and the daemon (asks first)"),
         ("L1: b", "bridge L1 funds to a LEZ account (channel_deposit): pick the account, the amount, check the plan"),
+        ("L1: t", "transfer between L1 addresses (wallet_transfer_funds): from, to (hex or a key name), amount, change"),
         ("L1: c / C", "show the node's config (secrets hidden) / set which config file the node uses"),
         ("Tab / ←→", "switch pane (Accounts, Guests, Deployed, Built-in); ↑↓ or j/k select"),
         ("q", "quit (the sequencer keeps running)"),
@@ -974,8 +977,42 @@ fn draw_l1_node(frame: &mut Frame, area: Rect, app: &App) {
     let l1 = &app.l1;
     let mut lines: Vec<Line> = Vec::new();
     let label = |text: &'static str| Span::raw(format!("{text:<10}")).dark_gray();
+    let node_log = l1.node_log.as_ref().filter(|_| l1.module_loaded());
     match &l1.node {
         None if !l1.checked => lines.push(Line::from("…").dark_gray()),
+        None if node_log.is_some_and(|log| log.started() && !log.online) => {
+            let log = node_log.expect("checked above");
+            lines.push(Line::from(vec![label("mode"), Span::raw("Bootstrapping").yellow()]));
+            lines.push(Line::from(vec![
+                label("phase"),
+                Span::raw(log.phase.clone().unwrap_or_default()),
+                Span::raw(format!(" since {}", log.since.as_deref().unwrap_or("?"))).dark_gray(),
+            ]));
+            if let Some(slot) = log.slot {
+                lines.push(Line::from(vec![
+                    label("slot"),
+                    Span::raw(slot.to_string()),
+                    Span::raw(format!("  latest block at {}", log.slot_at.as_deref().unwrap_or("?"))).dark_gray(),
+                ]));
+            }
+            if let Some(at) = log.online_expected() {
+                lines.push(Line::from(vec![label("online"), Span::raw(format!("about {at}")).cyan()]));
+            }
+            lines.push(
+                Line::from("It doesn't answer calls until Online, so wallets and balances wait; this is read from its log.")
+                    .dark_gray(),
+            );
+        }
+        None if node_log.is_some_and(|log| log.shut_down.is_some()) => {
+            let why = node_log.and_then(|log| log.shut_down.clone()).unwrap_or_default();
+            lines.push(Line::from("the node shut itself down").red());
+            lines.push(Line::from(why).dark_gray());
+            lines.push(Line::from("s starts it again").dark_gray());
+        }
+        None if l1.module_loaded() && node_log.is_some_and(|log| !log.started()) => {
+            lines.push(Line::from("the node isn't started (s starts it)").yellow());
+        }
+        None if l1.module_loaded() => lines.push(Line::from("…").dark_gray()),
         None => lines.push(Line::from(format!("{MODULE} isn't loaded")).dark_gray()),
         Some(node) => {
             let chain = node.chain.as_ref();

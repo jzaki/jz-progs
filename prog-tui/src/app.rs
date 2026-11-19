@@ -79,8 +79,11 @@ pub enum FormAction {
     Dirs,
     /// The L1 node's config: field `config`.
     L1Config,
-    /// Bridge L1 funds into a LEZ account: fields `to`, `amount`, `from (L1)`, `channel`.
+    /// Bridge L1 funds into a LEZ account: fields `to`, `amount`, `from (L1)`, `channel`,
+    /// `max fee`, `metadata`.
     Bridge,
+    /// L1 funds between L1 addresses: fields `from`, `to`, `amount`, `change`.
+    L1Transfer,
     /// Watch an account outside the wallet: fields `id`, `note`.
     Watch,
     /// Plan one message: fields `to`, one per param, then `sign`, `actors` and `pda seeds`.
@@ -486,7 +489,7 @@ impl App {
             self.last_l1 = Some(Instant::now());
             let (config, tx) = (self.l1_config(), self.tx.clone());
             self.rt.spawn(async move {
-                let _ = tx.send(Msg::L1(l1::gather(config, full).await));
+                let _ = tx.send(Msg::L1(Box::new(l1::gather(config, full).await)));
             });
         }
 
@@ -642,7 +645,7 @@ impl App {
             }
             Msg::L1(status) => {
                 self.refreshing.l1 = false;
-                self.l1 = status;
+                self.l1 = *status;
                 self.selected_l1_wallet = self
                     .selected_l1_wallet
                     .min(self.l1.wallets.len().saturating_sub(1));
@@ -834,6 +837,7 @@ impl App {
                             Planned::Wallet(call) => jobs::call(&mut ctx, &call).await,
                             Planned::Spel(call) => jobs::spel_call(&mut ctx, &call).await,
                             Planned::Bridge(call) => l1::bridge(&mut ctx, &call).await,
+                            Planned::L1Transfer(call) => l1::transfer(&mut ctx, &call).await,
                         }
                     });
                 }
@@ -1108,30 +1112,56 @@ impl App {
         });
     }
 
-    /// The deposit's details, after the LEZ account is picked. The L1 address defaults to the
-    /// selected L1 wallet when it holds funds, else the first that does.
-    fn bridge_form(&self, to: String) -> Form {
-        let funded = |wallet: &&l1::L1Wallet| {
-            wallet.balance.as_ref().is_ok_and(|b| b.parse::<u128>().is_ok_and(|b| b > 0))
-        };
-        let from = self
-            .l1
+    /// `t` on the L1 view: a transfer between L1 addresses, from the wallet holding the most.
+    fn open_l1_transfer(&mut self) {
+        let online = self.l1.node.as_ref().is_some_and(|node| node.chain.is_some());
+        if !online {
+            self.push_log("✗ L1 transfers need the node Online (it answers no calls before)".to_owned());
+            return;
+        }
+        let from = self.funded_l1_wallet().unwrap_or_default();
+        self.modal = Modal::Form(Form::new(
+            "L1 transfer (L1 module wallet_transfer_funds)".to_owned(),
+            vec![
+                ("from\nthe address that pays: hex, or a key name such as PoWClaim".to_owned(), from.clone()),
+                ("to\nhex, or a key name from the keystore".to_owned(), String::new()),
+                ("amount".to_owned(), String::new()),
+                ("change\nwhere the rest goes back to".to_owned(), from),
+            ],
+            FormAction::L1Transfer,
+        ));
+    }
+
+    /// The L1 wallet holding the most: the natural payer, since a deposit's or transfer's fee
+    /// comes from notes beside the ones it spends (`PoWClaim`, where mining rewards land, as a rule).
+    fn funded_l1_wallet(&self) -> Option<String> {
+        self.l1
             .wallets
-            .get(self.selected_l1_wallet)
-            .filter(funded)
-            .or_else(|| self.l1.wallets.iter().find(funded))
-            .map(|wallet| wallet.address.clone())
-            .unwrap_or_default();
+            .iter()
+            .filter_map(|wallet| {
+                let balance = wallet.balance.as_ref().ok()?.parse::<u128>().ok()?;
+                (balance > 0).then_some((balance, &wallet.address))
+            })
+            .max_by_key(|(balance, _)| *balance)
+            .map(|(_, address)| address.clone())
+    }
+
+    /// The deposit's details, after the LEZ account is picked. The L1 address defaults to the
+    /// wallet holding the most.
+    fn bridge_form(&self, to: String) -> Form {
+        let from = self.funded_l1_wallet().unwrap_or_default();
         Form::new(
-            "Bridge L1 → LEZ (L1 module channel_deposit)".to_owned(),
+            "Bridge L1 → LEZ (L1 module channel_deposit_with_notes)".to_owned(),
             vec![
                 ("to\nthe LEZ account credited (public)".to_owned(), to),
                 ("amount".to_owned(), String::new()),
-                ("from (L1)\nthe L1 address that pays, hex".to_owned(), from),
+                ("from (L1)\nthe L1 address that pays the note, the fees and takes the change, hex".to_owned(), from),
                 (
                     "channel\nthe LEZ network's channel on L1".to_owned(),
                     self.bridge_channel().unwrap_or_default(),
                 ),
+                ("max fee\nper transaction; a transfer paid about 10,000 on the devnet".to_owned(), "50000".to_owned()),
+                ("metadata\nkey: 01 00 ‖ pk (LEZ v0.4) · account: the 32-byte account id".to_owned(), "key".to_owned()),
             ],
             FormAction::Bridge,
         )
@@ -1171,6 +1201,7 @@ impl App {
                 }
             }
             KeyCode::Char('b') => self.open_bridge(),
+            KeyCode::Char('t') => self.open_l1_transfer(),
             KeyCode::Char('C') => {
                 self.modal = Modal::Form(Form::new(
                     "The L1 node's config (absolute, ~/…, or relative to prog-tui)".to_owned(),
@@ -1595,6 +1626,19 @@ impl App {
                     missing(self.programs.present()),
                 ));
             }
+            FormAction::L1Transfer => {
+                let Some(amount) = values[2].parse::<u64>().ok().filter(|amount| *amount > 0) else {
+                    self.push_log(format!("✗ amount must be a whole number above 0, not {:?}", values[2]));
+                    self.modal = Modal::Form(form);
+                    return;
+                };
+                let change = if values[3].is_empty() { values[0].clone() } else { values[3].clone() };
+                let call = l1::TransferCall { from: values[0].clone(), to: values[1].clone(), amount, change };
+                let config = self.l1_config();
+                self.spawn_job("plan L1 transfer", move |mut ctx| async move {
+                    l1::plan_transfer(&mut ctx, call, config).await
+                });
+            }
             FormAction::Bridge => {
                 let to = jobs::bare_account_id(&values[0]).to_owned();
                 let Some(amount) = values[1].parse::<u64>().ok().filter(|amount| *amount > 0) else {
@@ -1602,11 +1646,26 @@ impl App {
                     self.modal = Modal::Form(form);
                     return;
                 };
+                let Some(max_fee) = values[4].parse::<u64>().ok() else {
+                    self.push_log(format!("✗ max fee must be a whole number, not {:?}", values[4]));
+                    self.modal = Modal::Form(form);
+                    return;
+                };
+                let metadata = match l1::MetadataForm::parse(&values[5]) {
+                    Ok(metadata) => metadata,
+                    Err(error) => {
+                        self.push_log(format!("✗ {error}"));
+                        self.modal = Modal::Form(form);
+                        return;
+                    }
+                };
                 let request = l1::BridgeRequest {
                     from: values[2].clone(),
                     to,
                     amount,
                     channel: values[3].clone(),
+                    max_fee,
+                    metadata,
                 };
                 self.spawn_job("plan bridge", move |mut ctx| async move {
                     l1::plan_bridge(&mut ctx, request).await

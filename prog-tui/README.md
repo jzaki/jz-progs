@@ -112,7 +112,7 @@ Keep LEZ at the tag lez-programs pins (`v0.4.0-rc3` today), and spel on its `ref
 
 ## The L1 view
 
-`2` shows the Logos blockchain node (the L1) that the `logosctl` daemon runs as `blockchain_module`. Its data comes from running `logosctl --json …` (from PATH; `LOGOSCTL_CONFIG_DIR` is honoured, as logosctl itself does). It refreshes every 5s while shown (one call at a time), and asks only the daemon every 30s otherwise, for the tab's dot. The L1 is the same whichever LEZ network you chose. Two keys act on it, `s` and `b`; the rest only read.
+`2` shows the Logos blockchain node (the L1) that the `logosctl` daemon runs as `blockchain_module`. Its data comes from running `logosctl --json …` (from PATH; `LOGOSCTL_CONFIG_DIR` is honoured, as logosctl itself does). It refreshes every 5s while shown (one call at a time), and asks only the daemon every 30s otherwise, for the tab's dot. The L1 is the same whichever LEZ network you chose. Three keys act on it, `s`, `b` and `t`; the rest only read.
 
 - **L1 daemon:** logosctl's path and session directory, the daemon's state, pid and version, and each module's state, version, uptime, memory and CPU. When the daemon or the module isn't running, it shows the commands to start them.
 - **L1 node:** sync mode (`Online` once synced), height, slot and LIB slot, tip, peers, epoch and genesis, mining and auto-claim, claimable vouchers. Then the config file, and the selected wallet's full address.
@@ -122,13 +122,15 @@ Keep LEZ at the tag lez-programs pins (`v0.4.0-rc3` today), and spel on its `ref
 |---|---|
 | `s` | Start the node: the daemon (`logosctl daemon start --detach`, its output in `.state/…/logs/l1-daemon.log`), then `module load blockchain_module`, then `start <config> ""`, each only when it isn't running yet. When the daemon runs, `s` stops the node and the daemon instead, after asking |
 | `b` | Bridge L1 funds to a LEZ account (below) |
+| `t` | Transfer between L1 addresses (`wallet_transfer_funds`): `from` (prefilled with the selected wallet when it holds funds), `to` and `change` (hex, or a key name from the keystore such as `LeaderFunding`, any case), `amount`. The plan shows both balances and the command; Enter sends, then watches the balances for 3 minutes. The node's wallet tracks funds only for some keys (`PoWClaim`), so a transfer to an untracked key shows only as the sender's balance dropping. A note that a pending transaction already spends (an unconfirmed deposit) can't be spent again until that one lands or is dropped |
 | `c` / `C` | Show the node's config / set which config file it uses |
 | `j` / `k`, `g` | Select a wallet, refresh now |
 
 logosctl 1.0.0's daemon has segfaulted (in `libQt6RemoteObjects`) while calls to its node were pending and the node was still syncing after a start. So prog-tui keeps those calls few:
 
 - From the LEZ view it asks only `logosctl status` (for the tab's dot), never the node.
-- The L1 view asks `get_cryptarchia_info` first and nothing more when that fails, then waits a minute before asking again. While the node syncs, expect `✗ get_cryptarchia_info … took over 30s` there.
+- The node's phase comes from the daemon's log (`<session>/logs/daemon.log`), not from the node: a node that isn't `Online` yet answers no calls (each fails after the daemon's 20s timeout). After its initial block download it spends an hour in `ProlongedBootstrapPeriod`; the L1 view shows `mode Bootstrapping`, the phase and since when, the latest block's slot, and `online about HH:MM`, and asks the node nothing until the log says `Chain is now Online.` Wallets and balances appear then. A node restarted soon after stopping goes Online at once.
+- `s` checks the same log before starting: a node already started (still bootstrapping, say) isn't started twice, and one that shut itself down (its block download found no peer) is started again.
 - It never kills a logosctl client, not even one slow to answer, and each runs in a session of its own, so quitting prog-tui or its terminal doesn't reach it.
 
 ### Bridging L1 funds into LEZ
@@ -136,15 +138,37 @@ logosctl 1.0.0's daemon has segfaulted (in `libQt6RemoteObjects`) while calls to
 `b` deposits L1 funds into the channel of the LEZ network you chose, for a LEZ account that the sequencer then credits:
 
 1. Pick the LEZ account: the wallet's public accounts on this network, `ACCOUNT` (key `A` on the LEZ view) selected first. A private account can't receive a deposit this way.
-2. Fill in the amount. The L1 address that pays is the selected L1 wallet when it holds funds, else the first one that does; the channel is the network's `channel_id` in `networks.json`, else what its sequencer reports.
-3. The plan shows both balances, the LEZ account's public key (`wallet account get --keys`), the L1 channel's state (`get_channel_state`), the metadata, and the exact command. Enter sends:
+2. Fill in the form:
+   - `amount`.
+   - `from (L1)`: the address that pays the deposited note, the fees, and takes the change. It defaults to the wallet holding the most (`PoWClaim`, where mining rewards land).
+   - `channel`: the network's `channel_id` in `networks.json`, else what its sequencer reports.
+   - `max fee`: per transaction, default 50,000. A transfer paid about 10,000 on the devnet.
+   - `metadata`: how the deposit names its recipient. `key` (the default) is `01 00 ‖ pk`, LEZ v0.4.0-rc3's `bridge_core::DepositMetadata { recipient: Identified(Key(pk)) }`, with the pk from `wallet account get --keys`. `account` is the account id's 32 bytes, as the Logos Blockchain app's bridging guide describes for the LEZ testnet; LEZ v0.4.0-rc3's bridge rejects that form. Which one a network takes depends on its LEZ version.
+3. The plan shows the notes, the LEZ balance, the channel check, and the steps with their exact commands. Enter sends:
+   1. When `from` has no note of exactly `amount`, a transfer from `from` to itself splits one off (`wallet_transfer_funds`, fee paid), and the job waits for it to land in a block.
+   2. The deposit spends that note, with `from` paying the fee from its other notes and taking the change:
 
-   ```sh
-   logosctl call blockchain_module channel_deposit str:<channel> str:<L1 address> str:<amount> str:0100<LEZ pk> str:
-   ```
+      ```sh
+      logosctl call blockchain_module channel_deposit_with_notes str:<channel> 'json:["<note>"]' str:<metadata> str:<from> 'json:["<from>"]' str:<max fee> str:
+      ```
+4. The job waits for the deposit to land in an L1 block (its note is spent then). LEZ credits it once L1 finalises that block: 120 blocks, about an hour. The Accounts pane shows it then.
 
-   The metadata is LEZ's `bridge_core::DepositMetadata { recipient: Identified(Key(pk)) }` in Borsh, as hex: `01` (Identified), `00` (Key), the 32-byte public key. Every argument goes as `str:…`: logosctl guesses types, so a bare `1` would go as a number, and the module's `amount` is text, so it fails with `success:false` and no reason. `str:` alone is the empty tip (none).
-4. prog-tui then watches the LEZ account's balance for 3 minutes. The sequencer mints a deposit when it sees it on L1, at the latest once L1 finalises it, so a credit can take longer; the Accounts pane shows it when it lands.
+The module's other deposit call, `channel_deposit`, takes an amount and splits the note itself, but it pays no fee ("the platform gas price is currently 0", its code says); deposits sent with it stayed in the mempool and never landed, while fee-paying transfers did. Arguments go as `str:…` (and lists as `json:[…]`): logosctl guesses types, so a bare `1` would go as a number, and the module's amounts are text, which fails with `success:false` and no reason.
+
+### What the L1 keys are for
+
+From the node's `keystore.rs` and the node docs; the six ZK keys are the wallet's known addresses:
+
+| Key | For |
+|---|---|
+| `PoWClaim` | Mining auto-claim pays rewards here: the general-purpose funds key, and the natural payer for transfers and deposits |
+| `Stake` | Stakeholder identity for block leadership: notes here count as stake once aged |
+| `LeaderFunding` | `cryptarchia.leader.wallet.funding_pk`: funds the node's own transactions as a leader |
+| `VaucherMaster` | `wallet.voucher_master_key_id` (sic): derives the vouchers that receipt leader rewards |
+| `SdpFunding` | Pays service-declaration fees (joining Blend, and its per-epoch activity message) |
+| `BlendZk` | Blend core-node identity: a note of at least 1B is locked as the declaration's stake |
+| `BlendSigning` (Ed25519) | Blend message signing; the provider id in the declaration |
+| `NetworkSwarm` (Ed25519) | The node's libp2p identity |
 
 logosctl can't say which config the node was started with, so prog-tui keeps it as a setting. `C` sets it; empty means the one Basecamp's blockchain UI last used (`userConfigPath` in `~/.config/Logos/BlockchainUI.conf`). It's shared by every network, like the checkouts. `c` shows it through the module's `show_config`, with secrets as `<secret>`.
 

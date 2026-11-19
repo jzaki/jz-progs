@@ -88,6 +88,101 @@ pub struct Node {
     pub error: Option<String>,
 }
 
+/// The node's state as its log tells it: prog-tui reads this before calling the node at all,
+/// since a node that isn't `Online` yet doesn't answer calls (each fails after the daemon's 20s
+/// timeout), and calls piling up on it have crashed the daemon.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NodeLog {
+    /// The latest `entering <phase> phase`, e.g. `ProlongedBootstrapPeriod`.
+    pub phase: Option<String>,
+    /// When it entered that phase, as logged (`2026-11-19 09:33:04`).
+    pub since: Option<String>,
+    /// `Chain is now Online.` came after the node last started.
+    pub online: bool,
+    /// The node gave up and shut itself down (its initial block download failed), with why.
+    pub shut_down: Option<String>,
+    /// The slot of the latest block it received.
+    pub slot: Option<u64>,
+    /// When it received that block.
+    pub slot_at: Option<String>,
+}
+
+impl NodeLog {
+    /// The node was started in this daemon and hasn't shut itself down since.
+    pub fn started(&self) -> bool {
+        self.phase.is_some() && self.shut_down.is_none()
+    }
+
+    /// When `ProlongedBootstrapPeriod` should end: it lasts an hour (as observed: 20:02:07 →
+    /// 21:02:12, 10:24:14 → 11:24:14).
+    pub fn online_expected(&self) -> Option<String> {
+        if self.online || self.phase.as_deref() != Some("ProlongedBootstrapPeriod") {
+            return None;
+        }
+        let since = self.since.as_deref()?;
+        let (date, time) = since.split_once(' ')?;
+        let mut parts = time.split(':').map(|part| part.parse::<u32>().ok());
+        let (h, m) = (parts.next()??, parts.next()??);
+        let _ = date;
+        Some(format!("{:02}:{m:02}", (h + 1) % 24))
+    }
+}
+
+/// `[2026-11-19 09:33:04.709] …` → `2026-11-19 09:33:04`.
+fn log_time(line: &str) -> Option<String> {
+    let stamp = line.strip_prefix('[')?.split(']').next()?;
+    Some(stamp.split('.').next()?.to_owned())
+}
+
+/// Reads the node's phase from the daemon's log (one file per daemon start). The node logs
+/// through the daemon, so this needs no call to it.
+pub fn parse_node_log(text: &str) -> NodeLog {
+    let mut log = NodeLog::default();
+    for line in text.lines() {
+        if !line.contains("[blockchain_module]") {
+            continue;
+        }
+        if let Some(rest) = line.split("entering ").nth(1)
+            && let Some(phase) = rest.strip_suffix(" phase").or_else(|| rest.split(" phase").next())
+            && !phase.contains(' ')
+        {
+            if phase == "AwaitingGenesisTime" {
+                // A (re)start: what came before belongs to the last run.
+                log = NodeLog::default();
+            }
+            log.phase = Some(phase.to_owned());
+            log.since = log_time(line);
+            if phase == "Following" {
+                log.online = true;
+            }
+        } else if line.contains("Chain is now Online") {
+            log.online = true;
+        } else if line.contains("Initiating graceful shutdown") {
+            let why = line
+                .split("ERROR")
+                .nth(1)
+                .and_then(|rest| rest.split(": ").nth(1))
+                .unwrap_or("it shut itself down")
+                .trim();
+            log.shut_down = Some(why.to_owned());
+            log.online = false;
+        } else if line.contains("Received new block")
+            && let Some(slot) = line.split("\"slot\":").nth(1)
+        {
+            let digits: String = slot.chars().take_while(char::is_ascii_digit).collect();
+            log.slot = digits.parse().ok();
+            log.slot_at = log_time(line);
+        }
+    }
+    log
+}
+
+/// The current daemon's log: `<session>/logs/daemon.log`, a link to this start's file.
+pub fn read_node_log() -> Option<NodeLog> {
+    let text = std::fs::read(session_dir().join("logs/daemon.log")).ok()?;
+    Some(parse_node_log(&String::from_utf8_lossy(&text)))
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct L1Wallet {
     /// Hex, as `wallet_get_known_addresses` lists it.
@@ -117,6 +212,8 @@ pub struct L1Status {
     pub modules: Vec<ModuleRow>,
     /// Set when `blockchain_module` is loaded.
     pub node: Option<Node>,
+    /// The node's phase, from the daemon's log.
+    pub node_log: Option<NodeLog>,
     pub wallets: Vec<L1Wallet>,
     /// Why the wallets couldn't be listed.
     pub wallets_error: Option<String>,
@@ -369,7 +466,16 @@ pub async fn gather(config: Option<PathBuf>, full: bool) -> L1Status {
             return status;
         }
     }
-    if !status.running() || !full {
+    if !status.running() {
+        return status;
+    }
+    status.node_log = tokio::task::spawn_blocking(read_node_log).await.ok().flatten();
+    if !full {
+        return status;
+    }
+    // Only an Online node answers; until the log says so, nothing is asked of it.
+    let online = status.node_log.as_ref().is_some_and(|log| log.online);
+    if !online {
         return status;
     }
 
@@ -539,9 +645,27 @@ pub async fn start(ctx: &mut Ctx, config: Option<PathBuf>) -> anyhow::Result<()>
         }
     }
 
-    if node_started(&program).await {
-        ctx.log("L1: the node is already running");
-        return Ok(());
+    // The log says whether the node was started; asking the node fails while it bootstraps.
+    match read_node_log() {
+        Some(log) if log.started() => {
+            ctx.log(format!(
+                "L1: the node is already running (phase {}{})",
+                log.phase.as_deref().unwrap_or("?"),
+                log.online_expected().map(|at| format!(", Online about {at}")).unwrap_or_default()
+            ));
+            return Ok(());
+        }
+        Some(log) if log.shut_down.is_some() => {
+            ctx.log(format!(
+                "L1: the node had shut itself down ({}); starting it again",
+                log.shut_down.as_deref().unwrap_or("")
+            ));
+        }
+        _ if node_started(&program).await => {
+            ctx.log("L1: the node is already running");
+            return Ok(());
+        }
+        _ => {}
     }
     let config = config
         .filter(|path| path.is_file())
@@ -587,54 +711,104 @@ pub async fn stop(ctx: &mut Ctx) -> anyhow::Result<()> {
 
 // ---- Bridging L1 funds into LEZ ----
 
-/// A bridge deposit as asked for: L1 funds from `from` to the LEZ account `to`, through the
-/// network's channel.
+/// How a deposit names its LEZ recipient (its `metadata`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetadataForm {
+    /// `borsh(DepositMetadata { recipient: Identified(Key(pk)) })`, `01 00 ‖ pk`: what LEZ
+    /// v0.4.0-rc3's bridge (`bridge_core::deposit`) parses.
+    Key,
+    /// The recipient's 32-byte account id, as the Logos Blockchain app's guide describes for the
+    /// LEZ testnet. LEZ v0.4.0-rc3's bridge rejects this form.
+    Account,
+}
+
+impl MetadataForm {
+    pub fn parse(text: &str) -> anyhow::Result<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "" | "key" => Ok(Self::Key),
+            "account" | "id" => Ok(Self::Account),
+            other => bail!("metadata is `key` or `account`, not {other:?}"),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Key => "key (01 00 ‖ pk, LEZ v0.4)",
+            Self::Account => "account (the 32-byte account id)",
+        }
+    }
+}
+
+/// A bridge deposit as asked for: `amount` of the L1 address `from`'s funds to the LEZ account
+/// `to`, through the network's channel.
 #[derive(Clone, Debug)]
 pub struct BridgeRequest {
-    /// The L1 address (a public key, hex) that pays.
+    /// The L1 address (hex) that pays: the deposited note, the fees and the change are its.
     pub from: String,
     /// The LEZ account credited, base58.
     pub to: String,
     pub amount: u64,
     /// The LEZ network's channel on the L1, hex.
     pub channel: String,
+    /// The most each transaction may pay in fees (a transfer paid about 10,000 on the devnet).
+    pub max_fee: u64,
+    pub metadata: MetadataForm,
 }
 
-/// A planned deposit: `channel_deposit(channel, from, amount, metadata, tip)`.
+/// A planned deposit. It deposits one whole note worth exactly `amount`, with
+/// `channel_deposit_with_notes`, which (unlike `channel_deposit`) pays a fee: a deposit without
+/// one never got into a block.
 #[derive(Clone, Debug)]
 pub struct BridgeCall {
     pub request: BridgeRequest,
     /// The LEZ account's public key, hex.
     pub pk: String,
-    /// `borsh(DepositMetadata { recipient: Identified(Key(pk)) })`, hex.
+    /// The deposit's metadata, hex.
     pub metadata: String,
+    /// A note of `from` worth exactly `amount`, when there is one; otherwise sending splits one
+    /// off first, with a transfer from `from` to itself.
+    pub note: Option<String>,
 }
 
 impl BridgeCall {
-    pub fn args(&self) -> Vec<String> {
+    /// `channel_deposit_with_notes(channel, [note], metadata, change, [funding], max_fee, tip)`:
+    /// `from` funds the fee from its other notes and takes the change.
+    pub fn deposit_args(&self, note: &str) -> Vec<String> {
         let request = &self.request;
         vec![
             "call".into(),
             MODULE.into(),
-            "channel_deposit".into(),
+            "channel_deposit_with_notes".into(),
             text_arg(&request.channel),
-            text_arg(&request.from),
-            // The module's `amount` is text; a bare `1` would go as a number.
-            text_arg(&request.amount.to_string()),
+            format!("json:[\"{note}\"]"),
             text_arg(&self.metadata),
-            // No tip.
+            text_arg(&request.from),
+            format!("json:[\"{}\"]", request.from),
+            text_arg(&request.max_fee.to_string()),
+            // No tip: the current one.
             text_arg(""),
         ]
     }
 
-    pub fn command_line(&self) -> String {
-        let args: Vec<String> = self
-            .args()
-            .into_iter()
-            .map(|arg| if arg.contains([' ', '"', '\'']) { format!("'{arg}'") } else { arg })
-            .collect();
-        format!("logosctl {}", args.join(" "))
+    /// The transfer that makes a note of exactly `amount`: `from` to itself.
+    pub fn split(&self) -> TransferCall {
+        let from = &self.request.from;
+        TransferCall {
+            from: from.clone(),
+            to: from.clone(),
+            amount: self.request.amount,
+            change: from.clone(),
+        }
     }
+}
+
+/// `logosctl <args>` as a shell would need it typed.
+fn shell_line(args: Vec<String>) -> String {
+    let args: Vec<String> = args
+        .into_iter()
+        .map(|arg| if arg.contains([' ', '"', '\'']) { format!("'{arg}'") } else { arg })
+        .collect();
+    format!("logosctl {}", args.join(" "))
 }
 
 fn is_hex32(text: &str) -> bool {
@@ -651,6 +825,17 @@ pub fn deposit_metadata(pk: &str) -> anyhow::Result<String> {
     Ok(format!("0100{pk}"))
 }
 
+/// The other form: the LEZ account id's 32 bytes, as hex.
+pub fn account_metadata(account: &str) -> anyhow::Result<String> {
+    let bytes = bs58::decode(account.trim())
+        .into_vec()
+        .map_err(|_| anyhow!("{account:?} isn't a base58 account id"))?;
+    if bytes.len() != 32 {
+        bail!("{account:?} is {} bytes, not 32", bytes.len());
+    }
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
 /// The `pk <hex>` line of `wallet account get --keys`.
 pub fn parse_pk(output: &str) -> Option<String> {
     output
@@ -659,15 +844,50 @@ pub fn parse_pk(output: &str) -> Option<String> {
         .map(|pk| pk.trim().to_ascii_lowercase())
 }
 
-/// Checks a deposit and works out its metadata from the LEZ account's public key, then shows the
-/// plan; Enter on it sends.
+/// `wallet_get_notes`' `{"notes":[{"id","value"}],"tip"}` as `(id, value)` pairs.
+pub fn parse_notes(value: &Value) -> Vec<(String, u64)> {
+    value
+        .get("notes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|note| {
+            let id = note.get("id")?.as_str()?.to_owned();
+            let value = match note.get("value")? {
+                Value::String(text) => text.parse().ok()?,
+                other => other.as_u64()?,
+            };
+            Some((id, value))
+        })
+        .collect()
+}
+
+async fn notes(program: &Path, address: &str) -> Result<Vec<(String, u64)>, String> {
+    Ok(parse_notes(&call(program, "wallet_get_notes", &[address, ""]).await?))
+}
+
+/// Runs a module call for a job and returns its value, or fails with the module's reason.
+async fn job_call(ctx: &mut Ctx, program: &Path, args: Vec<String>) -> anyhow::Result<Value> {
+    let label = shell_line(args.clone());
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (_, out) = run(ctx, &label, program, &args, Duration::from_secs(120)).await?;
+    let reply: Value = serde_json::from_str(out.trim())
+        .map_err(|_| anyhow!("logosctl's reply isn't JSON: {}", first_line(&out).unwrap_or("")))?;
+    if let Some(error) = top_level_error(&reply) {
+        bail!("{error}");
+    }
+    call_value(&reply).map_err(|error| anyhow!("{}: {error}", args.get(2).copied().unwrap_or("call")))
+}
+
+/// Checks a deposit, works out its metadata and the note it deposits, then shows the plan;
+/// Enter on it sends.
 pub async fn plan_bridge(ctx: &mut Ctx, request: BridgeRequest) -> anyhow::Result<()> {
     let program = logosctl_path().ok_or_else(|| anyhow!("logosctl isn't on PATH"))?;
     let channel = request.channel.trim().trim_start_matches("0x").to_ascii_lowercase();
     if !is_hex32(&channel) {
         bail!("the channel id is 32 bytes of hex, not {:?}", request.channel);
     }
-    let from = request.from.trim().to_ascii_lowercase();
+    let from = request.from.trim().trim_start_matches("0x").to_ascii_lowercase();
     if !is_hex32(&from) {
         bail!("the L1 address is 32 bytes of hex, not {:?}", request.from);
     }
@@ -681,47 +901,71 @@ pub async fn plan_bridge(ctx: &mut Ctx, request: BridgeRequest) -> anyhow::Resul
             request.to
         )
     })?;
-    let metadata = deposit_metadata(&pk)?;
+    let metadata = match request.metadata {
+        MetadataForm::Key => deposit_metadata(&pk)?,
+        MetadataForm::Account => account_metadata(&request.to)?,
+    };
 
-    let l1_balance = call(&program, "wallet_get_balance", &[&request.from])
+    let notes = notes(&program, &request.from)
         .await
         .map_err(|error| anyhow!("the L1 address {}: {error}", jobs::short(&request.from)))?;
-    let l1_balance = match l1_balance {
-        Value::String(text) => text,
-        other => other.to_string(),
-    };
+    let total: u64 = notes.iter().map(|(_, value)| value).sum();
+    let note = notes
+        .iter()
+        .find(|(_, value)| *value == request.amount)
+        .map(|(id, _)| id.clone());
     let lez_balance = ctx.rpc.account(&request.to).await?.map(|view| view.balance());
     let channel_state = call(&program, "get_channel_state", &[&request.channel]).await;
 
-    let call = BridgeCall { request, pk, metadata };
+    let call = BridgeCall { request, pk, metadata, note };
     let request = &call.request;
     let mut lines = vec![
-        format!("from L1     {}  (balance {l1_balance})", request.from),
-        format!("to LEZ      Public/{}  (balance {})", request.to, lez_balance.map_or("not on chain yet".to_owned(), |b| b.to_string())),
+        format!("from L1     {}  ({} in {} note(s))", request.from, total, notes.len()),
+        format!(
+            "to LEZ      Public/{}  (balance {})",
+            request.to,
+            lez_balance.map_or("not on chain yet".to_owned(), |b| b.to_string())
+        ),
         format!("  its pk    {}", call.pk),
         format!("amount      {}", request.amount),
+        format!("max fee     {} per transaction", request.max_fee),
         format!("channel     {}  ({})", request.channel, ctx.network.label()),
-        format!("metadata    {}  (Identified, Key, pk)", call.metadata),
+        format!("metadata    {}  ({})", call.metadata, request.metadata.name()),
         String::new(),
     ];
     match &channel_state {
-        Ok(state) => {
-            let text = state.to_string();
-            let shown: String = text.chars().take(200).collect();
-            lines.push(format!("channel on L1: {shown}{}", if text.len() > 200 { "…" } else { "" }));
-        }
+        Ok(_) => lines.push("channel on L1: found".to_owned()),
         Err(error) => lines.push(format!("✗ channel on L1: {error}")),
     }
-    let enough = l1_balance.parse::<u128>().is_ok_and(|b| b >= u128::from(request.amount));
+    // The fee comes from `from`'s other notes, never the deposited one.
+    let (steps, enough) = match &call.note {
+        Some(note) => {
+            let others = total - request.amount;
+            lines.push(format!("1. deposit note {} (exactly {})", jobs::short(note), request.amount));
+            lines.push(format!("   $ {}", shell_line(call.deposit_args(note))));
+            (1, others >= request.max_fee)
+        }
+        None => {
+            lines.push(format!("1. no note of exactly {}: split one off, `from` to itself", request.amount));
+            lines.push(format!("   $ {}", call.split().command_line()));
+            lines.push("   then wait for it to land in a block (a few minutes)".to_owned());
+            lines.push("2. deposit that note, the fee paid from the change".to_owned());
+            lines.push(format!("   $ {}", shell_line(call.deposit_args("<the new note>"))));
+            (2, total >= request.amount + 2 * request.max_fee)
+        }
+    };
     if !enough {
-        lines.push(format!("✗ the L1 address holds {l1_balance}, less than {}", request.amount));
+        lines.push(format!(
+            "✗ {} can't cover {} plus up to {} in fees beside the deposited note",
+            jobs::short(&request.from),
+            request.amount,
+            request.max_fee * steps
+        ));
     }
     lines.push(String::new());
-    lines.push(format!("$ {}", call.command_line()));
-    lines.push(String::new());
     lines.push(
-        "The sequencer credits the LEZ account once it sees the deposit on L1. Enter sends, then \
-         watches the LEZ balance for up to 3 minutes."
+        "Enter sends, then waits for the deposit to land in an L1 block. LEZ credits it once L1 \
+         finalises that block: 120 blocks, about an hour."
             .to_owned(),
     );
     ctx.send(Msg::Plan {
@@ -732,11 +976,199 @@ pub async fn plan_bridge(ctx: &mut Ctx, request: BridgeRequest) -> anyhow::Resul
     Ok(())
 }
 
-/// Sends the deposit, then watches the LEZ account's balance.
+/// Polls `from`'s notes every 10s, up to `wait`, until `done` holds for them.
+async fn wait_for_notes(
+    program: &Path,
+    from: &str,
+    wait: Duration,
+    done: impl Fn(&[(String, u64)]) -> bool,
+) -> Option<Vec<(String, u64)>> {
+    let deadline = tokio::time::Instant::now() + wait;
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        if let Ok(notes) = notes(program, from).await
+            && done(&notes)
+        {
+            return Some(notes);
+        }
+    }
+    None
+}
+
+/// Sends the deposit: splits off a note of exactly the amount first when there's none, waits
+/// for that to land, deposits it, then waits for the deposit to land.
 pub async fn bridge(ctx: &mut Ctx, call: &BridgeCall) -> anyhow::Result<()> {
     let program = logosctl_path().ok_or_else(|| anyhow!("logosctl isn't on PATH"))?;
-    let to = call.request.to.clone();
-    let before = ctx.rpc.account(&to).await?.map_or(0, |view| view.balance());
+    let (from, amount) = (call.request.from.clone(), call.request.amount);
+    let note = match &call.note {
+        Some(note) => note.clone(),
+        None => {
+            let before: Vec<String> = notes(&program, &from)
+                .await
+                .map_err(|error| anyhow!("{error}"))?
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            ctx.log(format!("splitting off a note of exactly {amount}: a transfer from {} to itself", jobs::short(&from)));
+            let sent = job_call(ctx, &program, call.split().args()).await?;
+            ctx.log(format!("✓ split submitted: {sent}; waiting for it to land in a block"));
+            let notes = wait_for_notes(&program, &from, Duration::from_secs(600), |notes| {
+                notes.iter().any(|(id, value)| *value == amount && !before.contains(id))
+            })
+            .await
+            .ok_or_else(|| {
+                anyhow!("the split didn't land within 10 minutes; once it does, b again deposits its note")
+            })?;
+            let (note, _) = notes
+                .into_iter()
+                .find(|(id, value)| *value == amount && !before.contains(id))
+                .expect("found above");
+            ctx.log(format!("✓ split in a block: note {} holds {amount}", jobs::short(&note)));
+            note
+        }
+    };
+
+    let sent = job_call(ctx, &program, call.deposit_args(&note)).await?;
+    ctx.log(format!("✓ deposit submitted on L1: {sent}"));
+    ctx.log("waiting for it to land in an L1 block (its note is spent then)".to_owned());
+    let landed = wait_for_notes(&program, &from, Duration::from_secs(600), |notes| {
+        !notes.iter().any(|(id, _)| *id == note)
+    })
+    .await;
+    match landed {
+        Some(_) => ctx.log(format!(
+            "✓ deposit in an L1 block. LEZ credits Public/{} once L1 finalises it: 120 blocks, about an hour",
+            jobs::short(&call.request.to)
+        )),
+        None => ctx.log(
+            "not in a block within 10 minutes: it waits in the node's mempool (keep the node running)",
+        ),
+    }
+    Ok(())
+}
+
+// ---- Transfers between L1 addresses ----
+
+/// An L1 transfer: `wallet_transfer_funds(change, [from], to, amount, tip)`.
+#[derive(Clone, Debug)]
+pub struct TransferCall {
+    /// The address that pays (hex); the module signs with its key from the keystore.
+    pub from: String,
+    pub to: String,
+    pub amount: u64,
+    /// Where the rest of the spent notes goes back to (hex), usually `from`.
+    pub change: String,
+}
+
+impl TransferCall {
+    pub fn args(&self) -> Vec<String> {
+        vec![
+            "call".into(),
+            MODULE.into(),
+            "wallet_transfer_funds".into(),
+            text_arg(&self.change),
+            // The senders are a list: logosctl's `json:` form.
+            format!("json:[\"{}\"]", self.from),
+            text_arg(&self.to),
+            text_arg(&self.amount.to_string()),
+            // No tip: the current one.
+            text_arg(""),
+        ]
+    }
+
+    pub fn command_line(&self) -> String {
+        shell_line(self.args())
+    }
+}
+
+/// An address as typed: hex (an optional `0x`), or the name of a key in the keystore beside the
+/// config (`PoWClaim`), matched without regard to case.
+pub fn resolve_address(text: &str, names: &BTreeMap<String, String>) -> anyhow::Result<String> {
+    let text = text.trim();
+    let hex = text.trim_start_matches("0x").to_ascii_lowercase();
+    if is_hex32(&hex) {
+        return Ok(hex);
+    }
+    names
+        .iter()
+        .find(|(_, name)| name.eq_ignore_ascii_case(text))
+        .map(|(hex, _)| hex.clone())
+        .ok_or_else(|| anyhow!("{text:?} is neither 32 bytes of hex nor a key name in the keystore"))
+}
+
+/// A balance as the module reports it, or why there's none (`Unknown wallet address.` for keys the
+/// wallet tracks no funds for).
+async fn balance_text(program: &Path, address: &str) -> Result<String, String> {
+    call(program, "wallet_get_balance", &[address]).await.map(|value| match value {
+        Value::String(text) => text,
+        other => other.to_string(),
+    })
+}
+
+/// Checks a transfer and shows its plan; Enter on it sends.
+pub async fn plan_transfer(ctx: &mut Ctx, call: TransferCall, config: Option<PathBuf>) -> anyhow::Result<()> {
+    let program = logosctl_path().ok_or_else(|| anyhow!("logosctl isn't on PATH"))?;
+    let names = names_beside(config.as_deref());
+    let call = TransferCall {
+        from: resolve_address(&call.from, &names)?,
+        to: resolve_address(&call.to, &names)?,
+        change: resolve_address(&call.change, &names)?,
+        ..call
+    };
+    if call.from == call.to {
+        bail!("from and to are the same address");
+    }
+    let label = |hex: &str| names.get(hex).map(|name| format!(" [{name}]")).unwrap_or_default();
+    let from_balance = balance_text(&program, &call.from).await;
+    let to_balance = balance_text(&program, &call.to).await;
+    let shown = |balance: &Result<String, String>| match balance {
+        Ok(balance) => format!("balance {balance}"),
+        Err(error) => error.clone(),
+    };
+    let mut lines = vec![
+        format!("from    {}{}  ({})", call.from, label(&call.from), shown(&from_balance)),
+        format!("to      {}{}  ({})", call.to, label(&call.to), shown(&to_balance)),
+        format!("amount  {}", call.amount),
+        format!("change  {}{}", call.change, label(&call.change)),
+        String::new(),
+    ];
+    let enough = from_balance
+        .as_ref()
+        .is_ok_and(|b| b.parse::<u128>().is_ok_and(|b| b >= u128::from(call.amount)));
+    if !enough {
+        lines.push(format!("✗ from can't pay {}: {}", call.amount, shown(&from_balance)));
+    }
+    if to_balance.is_err() {
+        lines.push(
+            "The node's wallet tracks no funds for `to`, so its balance won't show here; the \
+             sender's will drop once the transfer is in a block."
+                .to_owned(),
+        );
+    }
+    lines.push(
+        "A note already spent by a pending transaction (an unconfirmed deposit, say) can't be \
+         spent again: the two conflict and only one gets in."
+            .to_owned(),
+    );
+    lines.push(String::new());
+    lines.push(format!("$ {}", call.command_line()));
+    lines.push(String::new());
+    lines.push("Enter sends, then watches both balances for up to 3 minutes.".to_owned());
+    ctx.send(Msg::Plan {
+        title: format!("L1 transfer {} → {}", call.amount, jobs::short(&call.to)),
+        lines,
+        call: enough.then(|| Planned::L1Transfer(call.clone())),
+    });
+    Ok(())
+}
+
+/// Sends an L1 transfer, then watches the balances until one changes.
+pub async fn transfer(ctx: &mut Ctx, call: &TransferCall) -> anyhow::Result<()> {
+    let program = logosctl_path().ok_or_else(|| anyhow!("logosctl isn't on PATH"))?;
+    let before = (
+        balance_text(&program, &call.from).await,
+        balance_text(&program, &call.to).await,
+    );
     let args = call.args();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let (_, out) = run(ctx, &call.command_line(), &program, &args, Duration::from_secs(120)).await?;
@@ -745,25 +1177,34 @@ pub async fn bridge(ctx: &mut Ctx, call: &BridgeCall) -> anyhow::Result<()> {
     if let Some(error) = top_level_error(&reply) {
         bail!("{error}");
     }
-    let sent = call_value(&reply).map_err(|error| anyhow!("channel_deposit: {error}"))?;
-    ctx.log(format!("✓ deposit submitted on L1: {sent}"));
+    let sent = call_value(&reply).map_err(|error| anyhow!("wallet_transfer_funds: {error}"))?;
+    ctx.log(format!("✓ transfer submitted on L1: {sent}"));
 
-    ctx.log(format!("watching Public/{} (balance {before})", jobs::short(&to)));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
     loop {
-        let now = ctx.rpc.account(&to).await?.map_or(0, |view| view.balance());
-        if now > before {
-            ctx.log(format!("✓ credited on LEZ: {before} → {now} (+{})", now - before));
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let now = (
+            balance_text(&program, &call.from).await,
+            balance_text(&program, &call.to).await,
+        );
+        if now != before {
+            let show = |b: &Result<String, String>| b.clone().unwrap_or_else(|_| "-".to_owned());
+            ctx.log(format!(
+                "✓ in a block: from {} → {}, to {} → {}",
+                show(&before.0),
+                show(&now.0),
+                show(&before.1),
+                show(&now.1)
+            ));
             return Ok(());
         }
         if tokio::time::Instant::now() > deadline {
             ctx.log(
-                "not credited within 3 minutes. The sequencer mints a deposit once it sees it on \
-                 L1, at the latest when L1 finalises it; the Accounts pane will show the balance.",
+                "not in a block within 3 minutes: it waits in the node's mempool (keep the node \
+                 running); the L1 view shows the balances when it lands.",
             );
             return Ok(());
         }
-        tokio::time::sleep(Duration::from_secs(3)).await;
     }
 }
 
@@ -856,6 +1297,16 @@ mod tests {
         assert!(deposit_metadata("12").is_err());
         assert_eq!(parse_pk(&format!("Balance 0, nonce 0\npk {pk}\n")).as_deref(), Some(pk));
         assert_eq!(parse_pk("Balance 0"), None);
+        // The account form: the base58 id's 32 bytes.
+        let account = account_metadata("2bMvhBNWxGYjSHegycMBvNNL4eaKm3dDiBUUApHL8dPy").unwrap();
+        assert_eq!(account.len(), 64);
+        assert!(account_metadata("abc").is_err());
+        assert_eq!(MetadataForm::parse("").unwrap(), MetadataForm::Key);
+        assert_eq!(MetadataForm::parse("Account").unwrap(), MetadataForm::Account);
+        assert!(MetadataForm::parse("hex").is_err());
+
+        let notes = parse_notes(&serde_json::json!({"notes": [{"id": "c6a7", "value": "9966490"}, {"id": "aa", "value": 5}], "tip": "10"}));
+        assert_eq!(notes, [("c6a7".to_owned(), 9_966_490), ("aa".to_owned(), 5)]);
 
         let call = BridgeCall {
             request: BridgeRequest {
@@ -863,14 +1314,80 @@ mod tests {
                 to: "2bMv".into(),
                 amount: 5,
                 channel: "d616".into(),
+                max_fee: 50_000,
+                metadata: MetadataForm::Key,
             },
             pk: pk.into(),
             metadata: deposit_metadata(pk).unwrap(),
+            note: None,
         };
-        assert_eq!(call.args()[2..6], ["channel_deposit", "str:d616", "str:82da", "str:5"], "text, not numbers");
-        assert_eq!(call.args()[6], format!("str:0100{pk}"));
-        assert!(call.command_line().ends_with(" str:"), "no tip");
-        assert!(call.command_line().contains(" str:5 "));
+        assert_eq!(
+            call.deposit_args("aa")[2..],
+            [
+                "channel_deposit_with_notes".to_owned(),
+                "str:d616".to_owned(),
+                "json:[\"aa\"]".to_owned(),
+                format!("str:0100{pk}"),
+                "str:82da".to_owned(),
+                "json:[\"82da\"]".to_owned(),
+                "str:50000".to_owned(),
+                "str:".to_owned(),
+            ]
+        );
+        let split = call.split();
+        assert_eq!((split.from.as_str(), split.to.as_str(), split.amount), ("82da", "82da", 5));
+    }
+
+    #[test]
+    fn reads_the_nodes_phase_from_the_daemon_log() {
+        let started = "[2026-11-19 09:33:00.101] [out] [blockchain_module] INFO chain::service: entering AwaitingGenesisTime phase
+[2026-11-19 09:33:03.347] [out] [blockchain_module] INFO chain::service: entering InitialBlockDownload phase
+[2026-11-19 09:33:04.709] [out] [blockchain_module] INFO chain::service: entering ProlongedBootstrapPeriod phase
+[2026-11-19 09:42:41.071] [info] [logos] [blockchain_module] Received new block: {\"header\":{\"slot\":841360,\"parent_block\":\"26\"}}
+[2026-11-19 09:42:42.000] [out] [storage_module] entering Nothing phase
+";
+        let log = parse_node_log(started);
+        assert_eq!(log.phase.as_deref(), Some("ProlongedBootstrapPeriod"));
+        assert_eq!(log.since.as_deref(), Some("2026-11-19 09:33:04"));
+        assert_eq!(log.slot, Some(841_360));
+        assert!(log.started() && !log.online);
+        assert_eq!(log.online_expected().as_deref(), Some("10:33"));
+
+        let online = format!("{started}[2026-11-19 10:33:04.800] [out] [blockchain_module] INFO blend::service: Chain is now Online.\n");
+        let log = parse_node_log(&online);
+        assert!(log.online);
+        assert_eq!(log.online_expected(), None);
+
+        let failed = "[2026-11-19 09:18:10.000] [out] [blockchain_module] INFO chain::service: entering InitialBlockDownload phase
+[2026-11-19 09:24:43.699] [out] [blockchain_module] 2026-11-19T09:24:43Z ERROR logos_blockchain::chain::network: Initial Block Download failed: AllPeersFailed(AllPeersFailed). Initiating graceful shutdown. Retry with different bootstrap peers
+";
+        let log = parse_node_log(failed);
+        assert!(!log.started());
+        assert!(log.shut_down.as_deref().unwrap().starts_with("Initial Block Download failed"));
+    }
+
+    #[test]
+    fn builds_a_transfer_and_resolves_key_names() {
+        let a = "82da47b18aa86d6b18e786145f3d154383a7aa80af0e821e715c29199571670a";
+        let b = "9388f8d30cad0448ae2a145e0e3f0951b598ca06dfe48b23d3b2c49bd3a81e18";
+        let names = keystore_names(&format!("public_keys:\n  PoWClaim: {a}\n  LeaderFunding: {b}\n"));
+        assert_eq!(resolve_address("leaderfunding", &names).unwrap(), b);
+        assert_eq!(resolve_address(&format!("0x{}", a.to_uppercase()), &names).unwrap(), a);
+        assert!(resolve_address("Nobody", &names).is_err());
+
+        let call = TransferCall { from: a.into(), to: b.into(), amount: 7, change: a.into() };
+        assert_eq!(
+            call.args()[2..],
+            [
+                "wallet_transfer_funds".to_owned(),
+                format!("str:{a}"),
+                format!("json:[\"{a}\"]"),
+                format!("str:{b}"),
+                "str:7".to_owned(),
+                "str:".to_owned(),
+            ]
+        );
+        assert!(call.command_line().contains(&format!(" 'json:[\"{a}\"]' ")));
     }
 
     #[test]

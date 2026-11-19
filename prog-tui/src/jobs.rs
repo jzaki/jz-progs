@@ -78,7 +78,7 @@ pub enum Msg {
     Checklist(Vec<String>),
     Step(usize, StepState),
     /// The L1 node, its daemon and wallets, from logosctl.
-    L1(crate::l1::L1Status),
+    L1(Box<crate::l1::L1Status>),
     /// The L1 node's config, from `show_config`, or why it couldn't be read.
     L1Config(PathBuf, Result<String, String>),
 }
@@ -838,8 +838,10 @@ pub enum Planned {
     Wallet(PlannedCall),
     /// A lez-programs program's: `spel send`, which simulates before it sends.
     Spel(SpelCall),
-    /// L1 funds into a LEZ account: the L1 module's `channel_deposit`.
+    /// L1 funds into a LEZ account: the L1 module's `channel_deposit_with_notes`.
     Bridge(crate::l1::BridgeCall),
+    /// L1 funds between L1 addresses: the L1 module's `wallet_transfer_funds`.
+    L1Transfer(crate::l1::TransferCall),
 }
 
 impl Planned {
@@ -848,6 +850,7 @@ impl Planned {
             Self::Wallet(call) => &call.name,
             Self::Spel(call) => &call.name,
             Self::Bridge(_) => "bridge",
+            Self::L1Transfer(_) => "L1 transfer",
         }
     }
 
@@ -856,7 +859,8 @@ impl Planned {
         match self {
             Self::Wallet(_) => "wallet program call",
             Self::Spel(_) => "spel send",
-            Self::Bridge(_) => "logosctl channel_deposit",
+            Self::Bridge(_) => "logosctl channel_deposit_with_notes",
+            Self::L1Transfer(_) => "logosctl wallet_transfer_funds",
         }
     }
 }
