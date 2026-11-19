@@ -1,0 +1,56 @@
+# Payroll, laid out like lez-programs' `programs/token`: `core/` (messages and state: what clients
+# and the IDL depend on), this crate (the handler), and `methods/` (the one-line guest).
+#
+# Its own workspace, so it builds on its own from jz-progs. Cargo.lock and rust-toolchain.toml are
+# lez-programs' (LEZ v0.4.0-rc3, Rust 1.94.0), so the versions match its programs.
+
+[package]
+name = "payroll_program"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# Not `workspace = true`: that would inherit the `host` feature into the guest build.
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3" }
+payroll_core = { path = "core" }
+borsh = { version = "1.5", features = ["derive"] }
+
+[dev-dependencies]
+# `host` derives `Debug`/`PartialEq` on `Response`, for assertions.
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3", features = ["host"] }
+
+[workspace]
+members = [".", "core", "methods"]
+exclude = ["methods/guest"]
+resolver = "2"
+
+# lez-programs' lints.
+[workspace.lints.rust]
+rust_2018_idioms = { level = "deny", priority = -1 }
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious  = { level = "deny", priority = -1 }
+perf        = { level = "deny", priority = -1 }
+style       = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+allow_attributes = "warn"
+allow_attributes_without_reason = "deny"
+arithmetic_side_effects = "deny"
+indexing_slicing = "deny"
+as_conversions = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+large_enum_variant = "deny"
+wildcard_enum_match_arm = "deny"
+module_name_repetitions = "allow"
+similar_names = "allow"

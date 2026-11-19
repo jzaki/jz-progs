@@ -362,6 +362,14 @@ Two ways, depending on how big it is.
 
 **A single-file guest** (to try something quickly): put it in [jz-progs/example_progs/](example_progs) and press `u` in [prog-tui](prog-tui/README.md). prog-tui builds it as `jz_<name>` in a guest package it keeps in the lez-programs checkout (`lez-programs/jz/`), deploys it, and generates its spel IDL, so it's called with spel like token. For that, its message must be an `enum Message` with named fields, and text a `String` ([prog-tui/README.md](prog-tui/README.md), "Your own programs"). The five in `example_progs` show the patterns: a seat that speaks for its owner's PDA, granting the PDA's seed (`admin_seat`, `simple_token`), and reading the clock through its reply (`clock_gate`).
 
+**A private program, lez-programs style:** [example_progs/payroll](example_progs/payroll/README.md) is laid out like `programs/token` (`core/`, `src/`, `methods/`), and prog-tui doesn't build it. A seat's private PDA treasury pays employees amounts that never appear on chain. It shows:
+- a private PDA under seed grants;
+- custody transfers sealed to private recipients;
+- a timestamp validity window in place of a clock read;
+- the accrue-then-pay pattern, which keeps funds safe because a stored async credit can't bounce.
+
+It runs through [payroll-runner](payroll-runner/README.md), since no CLI at v0.4.0-rc3 sends a private call to a custom program.
+
 What to design around, such as authorization, who sent a message, stored messages and replies, is in the manual's Part I. If you are porting a v0.2 program, use [GUIDE_v0.2_v0.4.md](GUIDE_v0.2_v0.4.md).
 
 ### Where programs interact
@@ -388,7 +396,13 @@ Whether a message to an actor runs now or is stored for later depends on whether
 
 **An undeclared fresh public recipient fails the same way as a private one with no binding.** It is routed down the private path and finds no binding, so the call reverts. A reverted call is still included and charged, and the reason appears only in the sequencer log, if at all. In prog-tui this shows as "unchanged".
 
-**Observed with `example_progs/simple_token.rs`:** a `Transfer` or `Mint` to a fresh public account reverted without `--also <recipient>` and succeeded with it. The exact error wasn't read from the log. The `UnboundAsyncDestination` reading above is inferred from the code, not confirmed. Sending to a private holder was **not tested**.
+**Observed with `example_progs/simple_token.rs`:** a `Transfer` or `Mint` to a fresh public account reverted without `--also <recipient>` and succeeded with it. The exact error wasn't read from the log. The `UnboundAsyncDestination` reading above is inferred from the code, not confirmed. Sending simple_token to a private holder was **not tested**.
+
+**Observed with `example_progs/payroll`** (2026-11-19, local, v0.4.0-rc3):
+- A private PDA's native transfer to a foreign private account was published sealed, and its owner collected it with `wallet pending receive`.
+- A private transaction's fee must come from a private account. On a fresh chain the first private funds come from a genesis private account's pending credit (payroll-runner's `import-genesis-private`).
+- The wallet needs `RISC0_DEV_MODE=1` too, or it builds real proofs.
+- [payroll-runner/README.md](payroll-runner/README.md) has the session.
 
 ---
 
