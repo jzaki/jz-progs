@@ -84,6 +84,9 @@ pub enum FormAction {
     Bridge,
     /// L1 funds between L1 addresses: fields `from`, `to`, `amount`, `change`.
     L1Transfer,
+    /// The L1 config's `pow:` section, and prog-tui's mine-after-start: fields `threads`,
+    /// `tickets per block`, `claim every`, `claim targets`, `mine after start`.
+    PowSettings,
     /// Watch an account outside the wallet: fields `id`, `note`.
     Watch,
     /// Plan one message: fields `to`, one per param, then `sign`, `actors` and `pda seeds`.
@@ -220,6 +223,8 @@ pub struct App {
     last_accounts: Option<Instant>,
     last_views: Option<Instant>,
     last_l1: Option<Instant>,
+    /// `s` started the L1 node with mine-after-start on: start mining once it's Online.
+    l1_mine_pending: bool,
 }
 
 #[derive(Default)]
@@ -290,6 +295,7 @@ impl App {
             last_accounts: None,
             last_views: None,
             last_l1: None,
+            l1_mine_pending: false,
         };
         app.guests = app.programs.guests();
         app.save();
@@ -649,6 +655,7 @@ impl App {
                 self.selected_l1_wallet = self
                     .selected_l1_wallet
                     .min(self.l1.wallets.len().saturating_sub(1));
+                self.mine_if_pending();
             }
             Msg::L1Config(path, text) => {
                 let lines = match text {
@@ -838,6 +845,7 @@ impl App {
                             Planned::Spel(call) => jobs::spel_call(&mut ctx, &call).await,
                             Planned::Bridge(call) => l1::bridge(&mut ctx, &call).await,
                             Planned::L1Transfer(call) => l1::transfer(&mut ctx, &call).await,
+                            Planned::PowConfig(write) => l1::write_pow(&mut ctx, &write).await,
                         }
                     });
                 }
@@ -1195,13 +1203,21 @@ impl App {
                     );
                 } else {
                     let config = self.l1_config();
+                    let idle = self.busy.is_none();
                     self.spawn_job("start L1 node", move |mut ctx| async move {
                         l1::start(&mut ctx, config).await
                     });
+                    if idle && self.saved.l1_mine_after_start {
+                        self.l1_mine_pending = true;
+                        self.push_log("mining starts once the node is Online (p turns that off)".to_owned());
+                    }
                 }
             }
             KeyCode::Char('b') => self.open_bridge(),
             KeyCode::Char('t') => self.open_l1_transfer(),
+            KeyCode::Char('m') => self.toggle_pow(true),
+            KeyCode::Char('a') => self.toggle_pow(false),
+            KeyCode::Char('p') => self.open_pow_settings(),
             KeyCode::Char('C') => {
                 self.modal = Modal::Form(Form::new(
                     "The L1 node's config (absolute, ~/…, or relative to prog-tui)".to_owned(),
@@ -1228,10 +1244,93 @@ impl App {
                 });
             }
             KeyCode::Char(_) | KeyCode::Tab | KeyCode::BackTab => {
-                self.push_log("L1 view keys: s start/stop · b bridge · c/C config · j/k · g; 1 switches back to LEZ".to_owned());
+                self.push_log("L1 view keys: s start/stop · m mining · a auto-claim · p PoW settings · b bridge · t transfer · c/C config · j/k · g; 1 switches back to LEZ".to_owned());
             }
             _ => {}
         }
+    }
+
+    /// `m` (mining) or `a` (auto-claim) on the L1 view: flips it on the running node.
+    fn toggle_pow(&mut self, mining: bool) {
+        let Some(pow) = self.l1.node.as_ref().filter(|node| node.chain.is_some()).and_then(|node| node.pow.as_ref()) else {
+            self.push_log("✗ mining and auto-claim switch on an Online node (it answers no calls before)".to_owned());
+            return;
+        };
+        let (is_mining, is_armed) = l1::pow_flags(pow);
+        let switch = match (mining, is_mining, is_armed) {
+            (true, Some(true), _) => l1::PowSwitch::StopMining,
+            (true, _, _) => l1::PowSwitch::StartMining,
+            (false, _, Some(true)) => l1::PowSwitch::StopAutoClaim,
+            (false, _, _) => l1::PowSwitch::StartAutoClaim,
+        };
+        if switch == l1::PowSwitch::StopMining {
+            // Stopped by hand: don't start it again behind the user's back.
+            self.l1_mine_pending = false;
+        }
+        self.spawn_job(switch.label(), move |mut ctx| async move { l1::pow_switch(&mut ctx, switch).await });
+    }
+
+    /// After `s` started the node with mine-after-start on: once the node is Online and answers
+    /// `pow_status`, start mining (once).
+    fn mine_if_pending(&mut self) {
+        if !self.l1_mine_pending || self.busy.is_some() {
+            return;
+        }
+        let Some(pow) = self.l1.node.as_ref().filter(|node| node.chain.is_some()).and_then(|node| node.pow.as_ref()) else {
+            return;
+        };
+        self.l1_mine_pending = false;
+        if l1::pow_flags(pow).0 == Some(false) {
+            self.push_log("L1 node Online: starting mining (mine after start, p)".to_owned());
+            let switch = l1::PowSwitch::StartMining;
+            self.spawn_job(switch.label(), move |mut ctx| async move { l1::pow_switch(&mut ctx, switch).await });
+        }
+    }
+
+    /// `p` on the L1 view: the config's `pow:` section, and mine-after-start.
+    fn open_pow_settings(&mut self) {
+        let Some(config) = self.l1_config().filter(|path| path.is_file()) else {
+            self.push_log("✗ no L1 config file: C sets it".to_owned());
+            return;
+        };
+        let current = match &self.l1.pow_config {
+            Some(Ok(settings)) => settings.clone(),
+            Some(Err(error)) => {
+                self.push_log(format!("✗ the config's pow section: {error}"));
+                return;
+            }
+            None => l1::PowSettings::default(),
+        };
+        let names = l1::names_beside(Some(&config));
+        let suggestion = self.funded_l1_wallet().map(|hex| {
+            format!(" (e.g. {}=1000000)", names.get(&hex).cloned().unwrap_or(hex))
+        });
+        self.modal = Modal::Form(Form::new(
+            "L1 PoW settings (the config's pow section, read when the node starts)".to_owned(),
+            vec![
+                (
+                    "threads\nticket-search threads; auto: one per CPU".to_owned(),
+                    current.max_threads.map_or("auto".to_owned(), |n| n.to_string()),
+                ),
+                (
+                    "tickets per block\nsearch attempts in flight per block".to_owned(),
+                    current.max_tickets_per_block.to_string(),
+                ),
+                ("claim every\nauto-claim's tick: 10s, or 5 slots".to_owned(), current.tick.label()),
+                (
+                    format!(
+                        "claim targets\nkey=balance to reach, comma-separated; a keystore name or hex{}; empty: auto-claim off",
+                        suggestion.unwrap_or_default()
+                    ),
+                    current.targets_text(&names),
+                ),
+                (
+                    "mine after start\nyes: once a node s started is Online, prog-tui starts mining (no node resumes mining by itself)".to_owned(),
+                    if self.saved.l1_mine_after_start { "yes" } else { "no" }.to_owned(),
+                ),
+            ],
+            FormAction::PowSettings,
+        ));
     }
 
     fn cycle_focus(&mut self, forward: bool) {
@@ -1670,6 +1769,62 @@ impl App {
                 self.spawn_job("plan bridge", move |mut ctx| async move {
                     l1::plan_bridge(&mut ctx, request).await
                 });
+            }
+            FormAction::PowSettings => {
+                let mine = match values[4].to_ascii_lowercase().as_str() {
+                    "yes" | "y" | "on" | "true" => true,
+                    "no" | "n" | "off" | "false" | "" => false,
+                    other => {
+                        self.push_log(format!("✗ mine after start: yes or no, not {other:?}"));
+                        self.modal = Modal::Form(form);
+                        return;
+                    }
+                };
+                let Some(config) = self.l1_config() else {
+                    self.push_log("✗ no L1 config: C sets it".to_owned());
+                    return;
+                };
+                let request = l1::PowForm {
+                    threads: values[0].clone(),
+                    tickets: values[1].clone(),
+                    tick: values[2].clone(),
+                    targets: values[3].clone(),
+                };
+                // The node's wallet keys, when it's Online to say.
+                let known: Option<Vec<String>> = self
+                    .l1
+                    .node
+                    .as_ref()
+                    .filter(|node| node.chain.is_some() && self.l1.wallets_error.is_none())
+                    .map(|_| self.l1.wallets.iter().map(|wallet| wallet.address.clone()).collect());
+                let plan = match l1::plan_pow(&config, &request, known.as_deref()) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        self.push_log(format!("✗ {error:#}"));
+                        self.modal = Modal::Form(form);
+                        return;
+                    }
+                };
+                if mine != self.saved.l1_mine_after_start {
+                    self.saved.l1_mine_after_start = mine;
+                    self.save();
+                    self.push_log(format!(
+                        "mine after start: {}",
+                        if mine { "on (s starts the node, then mining once Online)" } else { "off" }
+                    ));
+                }
+                match plan {
+                    (_, None) => self.push_log("the config's pow section already says that".to_owned()),
+                    (lines, Some(write)) => {
+                        self.modal = Modal::Plan(PlanView {
+                            title: "L1 PoW settings".to_owned(),
+                            lines,
+                            call: Some(Planned::PowConfig(write)),
+                            scroll: Cell::new(0),
+                            read_only: false,
+                        });
+                    }
+                }
             }
             FormAction::L1Config => {
                 self.saved.l1_config.clone_from(&values[0]);

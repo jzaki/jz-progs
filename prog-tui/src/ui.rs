@@ -11,7 +11,7 @@ use ratatui::{
 use crate::{
     app::{AccountRow, App, Focus, Modal, View},
     jobs::{StepState, short},
-    l1::{L1Status, MODULE},
+    l1::{self, L1Status, MODULE},
     network::{NETWORKS_FILE, Network},
     rpc::{NATIVE_TOKEN, describe_bytes, format_balance},
     state::Origin,
@@ -109,7 +109,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             let keys = if scrolls { " · ↑↓ PgUp/PgDn scroll" } else { "" };
             let (footer, color) = match &view.call {
                 None if view.read_only => (format!(" read-only · Esc closes{keys} "), Color::Cyan),
-                Some(call) => (format!(" Enter send ({}) · Esc cancel{keys} ", call.sender()), Color::Yellow),
+                Some(call) => (format!(" Enter {} ({}) · Esc cancel{keys} ", call.verb(), call.sender()), Color::Yellow),
                 None => (format!(" nothing to send (see above) · Esc closes{keys} "), Color::Red),
             };
             frame.render_widget(
@@ -723,7 +723,7 @@ fn draw_keys(frame: &mut Frame, area: Rect, app: &App) {
     if app.view == View::L1 {
         frame.render_widget(
             Paragraph::new(
-                " s start/stop node · b bridge to LEZ · t L1 transfer · j/k wallet · c config · C config path · g refresh │ 1 LEZ · 2 L1 · N network · ? help · q quit",
+                " s start/stop node · m mining · a auto-claim · p PoW settings · b bridge to LEZ · t L1 transfer · j/k wallet · c/C config · g refresh │ 1 LEZ · 2 L1 · N network · ? help · q quit",
             )
             .dark_gray(),
             area,
@@ -766,10 +766,12 @@ fn draw_help(frame: &mut Frame) {
         ("L", "change the LEZ and lez-programs checkouts"),
         ("N", "back to the network selector: local standalone, or one from networks.json"),
         ("g", "refresh now"),
-        ("1 / 2", "the LEZ view / the L1 view: the logosctl daemon, the node and its wallets (read-only)"),
+        ("1 / 2", "the LEZ view / the L1 view: the logosctl daemon, the node, mining and its wallets"),
         ("L1: s", "start the L1 node (daemon, module, node), or stop it and the daemon (asks first)"),
         ("L1: b", "bridge L1 funds to a LEZ account (channel_deposit): pick the account, the amount, check the plan"),
         ("L1: t", "transfer between L1 addresses (wallet_transfer_funds): from, to (hex or a key name), amount, change"),
+        ("L1: m / a", "switch mining / auto-claim on the running node (not kept: every start begins with mining off)"),
+        ("L1: p", "PoW settings: the config's pow section (threads, claim tick, claim targets), read at node start; mine after start"),
         ("L1: c / C", "show the node's config (secrets hidden) / set which config file the node uses"),
         ("Tab / ←→", "switch pane (Accounts, Guests, Deployed, Built-in); ↑↓ or j/k select"),
         ("q", "quit (the sequencer keeps running)"),
@@ -976,7 +978,7 @@ fn draw_l1_daemon(frame: &mut Frame, area: Rect, app: &App) {
 fn draw_l1_node(frame: &mut Frame, area: Rect, app: &App) {
     let l1 = &app.l1;
     let mut lines: Vec<Line> = Vec::new();
-    let label = |text: &'static str| Span::raw(format!("{text:<10}")).dark_gray();
+    let label = |text: &'static str| Span::raw(format!("{text:<11}")).dark_gray();
     let node_log = l1.node_log.as_ref().filter(|_| l1.module_loaded());
     match &l1.node {
         None if !l1.checked => lines.push(Line::from("…").dark_gray()),
@@ -1043,20 +1045,62 @@ fn draw_l1_node(frame: &mut Frame, area: Rect, app: &App) {
                 Span::raw(format!("  genesis {}", field(time, "genesis_time"))).dark_gray(),
             ]));
             let pow = node.pow.as_ref();
-            let armed = pow
-                .and_then(|pow| pow.get("auto_claim"))
-                .and_then(|claim| claim.get("is_armed"))
-                .map_or("-".to_owned(), ToString::to_string);
+            let (mining, armed) = pow.map(l1::pow_flags).unwrap_or_default();
+            let switch = |flag: Option<bool>, on: &str, off: &str| match flag {
+                Some(true) => Span::raw(on.to_owned()).green(),
+                Some(false) => Span::raw(off.to_owned()).yellow(),
+                None => Span::raw("-"),
+            };
             lines.push(Line::from(vec![
                 label("mining"),
-                Span::raw(field(pow, "is_mining")),
-                Span::raw(format!("  auto-claim {armed}")).dark_gray(),
+                switch(mining, "on", "off"),
+                Span::raw("  m switches").dark_gray(),
+            ]));
+            let claim = pow.and_then(|pow| pow.get("auto_claim"));
+            let tick = claim.and_then(|claim| claim.get("tick"));
+            let every = match (tick.and_then(|t| t.get("unit")).and_then(|u| u.as_str()), tick.and_then(|t| t.get("value"))) {
+                (Some("slots"), Some(value)) => format!(" every {value} slots"),
+                (_, Some(value)) => format!(" every {value}s"),
+                _ => String::new(),
+            };
+            lines.push(Line::from(vec![
+                label("auto-claim"),
+                switch(armed, "armed", "off"),
+                Span::raw(format!("{every}  a switches")).dark_gray(),
+            ]));
+            let names: std::collections::BTreeMap<&str, &str> = l1
+                .wallets
+                .iter()
+                .filter_map(|wallet| Some((wallet.address.as_str(), wallet.name.as_deref()?)))
+                .collect();
+            let targets = claim.and_then(|claim| claim.get("targets")).and_then(|t| t.as_array());
+            for target in targets.into_iter().flatten() {
+                let key = field(Some(target), "public_key");
+                let name = names.get(key.as_str()).map_or_else(|| short(&key), |name| (*name).to_owned());
+                lines.push(Line::from(vec![
+                    Span::raw(format!("  → {name} ≥ {}", field(Some(target), "threshold"))),
+                    Span::raw(format!("  balance {}", field(Some(target), "balance"))).dark_gray(),
+                ]));
+            }
+            if targets.is_some_and(Vec::is_empty) {
+                lines.push(Line::from("  no claim targets: p sets them").dark_gray());
+            }
+            let rewards = node.rewards.as_ref();
+            let enabled = pow.and_then(|pow| pow.get("are_rewards_enabled")).and_then(|v| v.as_bool());
+            lines.push(Line::from(vec![
+                label("tickets"),
+                Span::raw(field(rewards, "claimable_tickets")),
+                Span::raw(match enabled {
+                    Some(false) => "  claimable · rewards off on this network".to_owned(),
+                    _ => "  claimable".to_owned(),
+                })
+                .dark_gray(),
             ]));
             let vouchers = node.vouchers.as_ref();
             lines.push(Line::from(vec![
-                label("claimable"),
+                label("vouchers"),
                 Span::raw(field(vouchers, "total_claimable")),
-                Span::raw(format!("  reward amount {}", field(vouchers, "reward_amount"))).dark_gray(),
+                Span::raw(format!("  claimable · reward amount {}", field(vouchers, "reward_amount"))).dark_gray(),
             ]));
             if let Some(error) = &node.error {
                 lines.push(Line::from(format!("✗ {error}")).red());
@@ -1078,6 +1122,16 @@ fn draw_l1_node(frame: &mut Frame, area: Rect, app: &App) {
                 lines.push(Line::from("  Basecamp's (C sets another) · c shows it").dark_gray());
             } else {
                 lines.push(Line::from("  c shows it · C changes it").dark_gray());
+            }
+            match &l1.pow_config {
+                Some(Ok(settings)) => {
+                    let names = l1::names_beside(Some(&path));
+                    lines.push(Line::from(vec![label("pow"), Span::raw(settings.summary(&names))]));
+                    let mine = if app.saved.l1_mine_after_start { "mine after start · " } else { "" };
+                    lines.push(Line::from(format!("  {mine}read at node start · p changes")).dark_gray());
+                }
+                Some(Err(error)) => lines.push(Line::from(vec![label("pow"), Span::raw(format!("✗ {error}")).red()])),
+                None => {}
             }
         }
         None => lines.push(Line::from(vec![label("config"), Span::raw("not set (C sets it)").yellow()])),

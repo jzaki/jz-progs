@@ -2,7 +2,7 @@
 name = "prog-tui"
 version = "0.1.0"
 edition = "2024"
-description = "Terminal UI for deploying and testing LEZ programs, with a view of the L1 node run by logosctl"
+description = "A terminal UI for LEZ programs and the Logos L1 node: deploy, call, wallets, bridging, mining"
 publish = false
 
 [dependencies]
@@ -12,6 +12,7 @@ ratatui = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 sha2 = "0.10"
 bs58 = "0.5"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "io-util", "sync"] }

@@ -842,6 +842,8 @@ pub enum Planned {
     Bridge(crate::l1::BridgeCall),
     /// L1 funds between L1 addresses: the L1 module's `wallet_transfer_funds`.
     L1Transfer(crate::l1::TransferCall),
+    /// A new `pow:` section for the L1 node's config.
+    PowConfig(crate::l1::PowWrite),
 }
 
 impl Planned {
@@ -851,6 +853,7 @@ impl Planned {
             Self::Spel(call) => &call.name,
             Self::Bridge(_) => "bridge",
             Self::L1Transfer(_) => "L1 transfer",
+            Self::PowConfig(_) => "L1 PoW settings",
         }
     }
 
@@ -861,6 +864,15 @@ impl Planned {
             Self::Spel(_) => "spel send",
             Self::Bridge(_) => "logosctl channel_deposit_with_notes",
             Self::L1Transfer(_) => "logosctl wallet_transfer_funds",
+            Self::PowConfig(_) => "the config's pow section",
+        }
+    }
+
+    /// The footer's verb for Enter.
+    pub fn verb(&self) -> &'static str {
+        match self {
+            Self::PowConfig(_) => "write",
+            _ => "send",
         }
     }
 }

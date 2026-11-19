@@ -112,10 +112,10 @@ Keep LEZ at the tag lez-programs pins (`v0.4.0-rc3` today), and spel on its `ref
 
 ## The L1 view
 
-`2` shows the Logos blockchain node (the L1) that the `logosctl` daemon runs as `blockchain_module`. Its data comes from running `logosctl --json …` (from PATH; `LOGOSCTL_CONFIG_DIR` is honoured, as logosctl itself does). It refreshes every 5s while shown (one call at a time), and asks only the daemon every 30s otherwise, for the tab's dot. The L1 is the same whichever LEZ network you chose. Three keys act on it, `s`, `b` and `t`; the rest only read.
+`2` shows the Logos blockchain node (the L1) that the `logosctl` daemon runs as `blockchain_module`. Its data comes from running `logosctl --json …` (from PATH; `LOGOSCTL_CONFIG_DIR` is honoured, as logosctl itself does). It refreshes every 5s while shown (one call at a time), and asks only the daemon every 30s otherwise, for the tab's dot. The L1 is the same whichever LEZ network you chose. Six keys act on it, `s`, `m`, `a`, `p`, `b` and `t`; the rest only read.
 
 - **L1 daemon:** logosctl's path and session directory, the daemon's state, pid and version, and each module's state, version, uptime, memory and CPU. When the daemon or the module isn't running, it shows the commands to start them.
-- **L1 node:** sync mode (`Online` once synced), height, slot and LIB slot, tip, peers, epoch and genesis, mining and auto-claim, claimable vouchers. Then the config file, and the selected wallet's full address.
+- **L1 node:** sync mode (`Online` once synced), height, slot and LIB slot, tip, peers, epoch and genesis; mining, auto-claim with its tick and targets (each with its balance), claimable tickets and vouchers. Then the config file and its `pow:` settings, and the selected wallet's full address.
 - **L1 wallets:** each address in `wallet_get_known_addresses` with its `wallet_get_balance`, and their total. Each address is named by its key in the `public_keys:` block of the `keystore.yaml` beside the config (`PoWClaim`, `Stake`, …). Only that block is read; the secret keys are not. Keys the wallet tracks no funds for (the node answers `Unknown wallet address.`) show as `no funds key`.
 
 | Key | Does |
@@ -123,6 +123,8 @@ Keep LEZ at the tag lez-programs pins (`v0.4.0-rc3` today), and spel on its `ref
 | `s` | Start the node: the daemon (`logosctl daemon start --detach`, its output in `.state/…/logs/l1-daemon.log`), then `module load blockchain_module`, then `start <config> ""`, each only when it isn't running yet. When the daemon runs, `s` stops the node and the daemon instead, after asking |
 | `b` | Bridge L1 funds to a LEZ account (below) |
 | `t` | Transfer between L1 addresses (`wallet_transfer_funds`): `from` (prefilled with the selected wallet when it holds funds), `to` and `change` (hex, or a key name from the keystore such as `LeaderFunding`, any case), `amount`. The plan shows both balances and the command; Enter sends, then watches the balances for 3 minutes. The node's wallet tracks funds only for some keys (`PoWClaim`), so a transfer to an untracked key shows only as the sender's balance dropping. A note that a pending transaction already spends (an unconfirmed deposit) can't be spent again until that one lands or is dropped |
+| `m` / `a` | Switch mining / auto-claim on the running node (below) |
+| `p` | PoW settings: the config's `pow:` section, and mine-after-start (below) |
 | `c` / `C` | Show the node's config / set which config file it uses |
 | `j` / `k`, `g` | Select a wallet, refresh now |
 
@@ -155,13 +157,35 @@ logosctl 1.0.0's daemon has segfaulted (in `libQt6RemoteObjects`) while calls to
 
 The module's other deposit call, `channel_deposit`, takes an amount and splits the note itself, but it pays no fee ("the platform gas price is currently 0", its code says); deposits sent with it stayed in the mempool and never landed, while fee-paying transfers did. Arguments go as `str:…` (and lists as `json:[…]`): logosctl guesses types, so a bare `1` would go as a number, and the module's amounts are text, which fails with `success:false` and no reason.
 
+### Mining and auto-claim
+
+The node mines PoW tickets for blocks; a ticket pays a reward once claimed, in a transaction that pays the reward into a key the node's wallet tracks. Claiming is by hand (`pow_claim`) or automatic.
+
+- `m` starts or stops mining (`pow_start_mining` / `pow_stop_mining`), `a` arms or disarms auto-claim (`pow_start_auto_claim` / `pow_stop_auto_claim`), on the running node, which must be `Online`. The job then logs what `pow_status` says.
+- Neither switch is kept. Every node start begins with mining off; auto-claim is armed at start exactly when the config names claim targets. Arming it with no targets does nothing (the node logs `PoW auto-claim not started: no claim targets configured`), which `a` reports.
+- Each tick, auto-claim pays the target furthest below its threshold. Once every target has reached its threshold, auto-claim disarms and **stops mining** with it.
+
+`p` edits the config's `pow:` section, which the node reads only when it starts (`s` to stop, `s` to start):
+
+| Field | Config | Meaning |
+|---|---|---|
+| `threads` | `pow.mining.max_threads` | Ticket-search threads; `auto` (`null`) is one per CPU. Default 1 |
+| `tickets per block` | `pow.mining.max_tickets_per_block` | Search attempts in flight per block. Default 1 |
+| `claim every` | `pow.auto_claim.tick` | `10s` (default) or `5 slots` |
+| `claim targets` | `pow.auto_claim.targets` | `key=balance to reach`, comma-separated, e.g. `PoWClaim=1000000`; a key is a keystore name or hex. Empty: auto-claim stays off |
+| `mine after start` | prog-tui's own setting | `yes`: after `s` starts the node, prog-tui starts mining once the node is `Online` (and answers `pow_status`). Stopping mining with `m` before then cancels it |
+
+The plan shows the section before and after, and the new YAML. Enter writes the file, keeping the old one as `<config>.bak`, and refuses if the file changed since the plan. Every claim target must be a key the node's wallet tracks (the L1 wallets pane), or the node refuses to start. So a new target needs the node `Online` to check it against `wallet_get_known_addresses`.
+
+prog-tui rewrites the section itself and leaves the rest of the file byte for byte. It checks that the new file reads back as the settings, with everything else unchanged. The module's own `pow_configure` (0.3.5-rc.1) checks targets against `wallet.known_keys` in the same file, and Basecamp's `user_config.yaml` holds only overrides, without that block. So `pow_configure` refuses every target there, with `wallet.known_keys … is not a block mapping`.
+
 ### What the L1 keys are for
 
 From the node's `keystore.rs` and the node docs; the six ZK keys are the wallet's known addresses:
 
 | Key | For |
 |---|---|
-| `PoWClaim` | Mining auto-claim pays rewards here: the general-purpose funds key, and the natural payer for transfers and deposits |
+| `PoWClaim` | Meant for mining rewards (as an auto-claim target): the general-purpose funds key, and the natural payer for transfers and deposits |
 | `Stake` | Stakeholder identity for block leadership: notes here count as stake once aged |
 | `LeaderFunding` | `cryptarchia.leader.wallet.funding_pk`: funds the node's own transactions as a leader |
 | `VaucherMaster` | `wallet.voucher_master_key_id` (sic): derives the vouchers that receipt leader rewards |

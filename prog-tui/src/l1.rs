@@ -6,8 +6,9 @@
 //! (`Saved::l1_config`). Its directory's `keystore.yaml` names the wallet addresses: only its
 //! `public_keys:` block is read.
 //!
-//! Besides reading, two jobs act: starting or stopping the node (daemon, module, node), and
-//! bridging L1 funds into a LEZ account with the module's `channel_deposit`.
+//! Besides reading, jobs act: starting or stopping the node (daemon, module, node), bridging L1
+//! funds into a LEZ account, L1 transfers, switching mining and auto-claim on the running node, and
+//! rewriting the config's `pow:` section, which the node reads when it starts.
 
 use std::{
     collections::BTreeMap,
@@ -84,6 +85,8 @@ pub struct Node {
     pub pow: Option<Value>,
     /// `wallet_get_claimable_vouchers`: `total_claimable`, `reward_amount`, `vouchers`.
     pub vouchers: Option<Value>,
+    /// `pow_claimable_rewards`: `claimable_tickets`, `slots_until_expiry`.
+    pub rewards: Option<Value>,
     /// The first error among those calls, to show when they all fail.
     pub error: Option<String>,
 }
@@ -219,6 +222,8 @@ pub struct L1Status {
     pub wallets_error: Option<String>,
     /// The config prog-tui was told the node runs with, if it exists.
     pub config: Option<PathBuf>,
+    /// That config's `pow:` section, which the node reads when it starts.
+    pub pow_config: Option<Result<PowSettings, String>>,
     /// Set once a refresh has come back.
     pub checked: bool,
 }
@@ -430,7 +435,7 @@ pub fn keystore_names(keystore: &str) -> BTreeMap<String, String> {
     names
 }
 
-fn names_beside(config: Option<&Path>) -> BTreeMap<String, String> {
+pub fn names_beside(config: Option<&Path>) -> BTreeMap<String, String> {
     config
         .and_then(Path::parent)
         .and_then(|dir| std::fs::read_to_string(dir.join("keystore.yaml")).ok())
@@ -452,6 +457,7 @@ pub async fn gather(config: Option<PathBuf>, full: bool) -> L1Status {
         checked: true,
         ..L1Status::default()
     };
+    status.pow_config = status.config.as_deref().map(read_pow_config);
     let Some(program) = status.logosctl.clone() else {
         return status;
     };
@@ -499,6 +505,7 @@ pub async fn gather(config: Option<PathBuf>, full: bool) -> L1Status {
             "get_network_info",
             "get_time_info",
             "pow_status",
+            "pow_claimable_rewards",
             "wallet_get_claimable_vouchers",
         ] {
             let result = call(&program, method, &[]).await;
@@ -506,6 +513,7 @@ pub async fn gather(config: Option<PathBuf>, full: bool) -> L1Status {
                 "get_network_info" => &mut found.network,
                 "get_time_info" => &mut found.time,
                 "pow_status" => &mut found.pow,
+                "pow_claimable_rewards" => &mut found.rewards,
                 _ => &mut found.vouchers,
             };
             match result {
@@ -1208,6 +1216,484 @@ pub async fn transfer(ctx: &mut Ctx, call: &TransferCall) -> anyhow::Result<()> 
     }
 }
 
+// ---- Mining and auto-claim (PoW) ----
+//
+// The running node takes four switches: `pow_start_mining`, `pow_stop_mining`,
+// `pow_start_auto_claim`, `pow_stop_auto_claim`. None is kept: every start begins with mining off,
+// and auto-claim armed exactly when the config names claim targets. Auto-claim pays, each tick, the
+// target furthest below its threshold, and stops mining once every target has reached its own.
+//
+// The settings live in the config's `pow:` section, read when the node starts. The module's
+// `pow_configure` writes it, but (0.3.5-rc.1) checks targets against `wallet.known_keys` in the
+// same file, which Basecamp's `user_config.yaml` doesn't hold, so it refuses every target there.
+// prog-tui rewrites the section itself, leaving the rest of the file as it was, and checks the
+// targets against the keys the running node's wallet tracks: a target it doesn't track stops the
+// node from starting.
+
+/// How often auto-claim tries: `pow.auto_claim.tick`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClaimTick {
+    Seconds(u64),
+    Slots(u64),
+}
+
+impl Default for ClaimTick {
+    /// The node's default.
+    fn default() -> Self {
+        Self::Seconds(10)
+    }
+}
+
+impl ClaimTick {
+    /// `10`, `10s`, `10 seconds`, `5 slots`.
+    pub fn parse(text: &str) -> anyhow::Result<Self> {
+        let text = text.trim().to_ascii_lowercase();
+        let digits = text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len());
+        let (number, unit) = text.split_at(digits);
+        let value: u64 = number
+            .parse()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| anyhow!("claim every {text:?}: a whole number above 0, then s or slots"))?;
+        match unit.trim() {
+            "" | "s" | "sec" | "secs" | "second" | "seconds" => Ok(Self::Seconds(value)),
+            "slot" | "slots" => Ok(Self::Slots(value)),
+            other => bail!("claim every {text:?}: unknown unit {other:?} (s or slots)"),
+        }
+    }
+
+    pub fn label(self) -> String {
+        match self {
+            Self::Seconds(value) => format!("{value}s"),
+            Self::Slots(1) => "1 slot".to_owned(),
+            Self::Slots(value) => format!("{value} slots"),
+        }
+    }
+
+    fn unit(self) -> (&'static str, u64) {
+        match self {
+            Self::Seconds(value) => ("seconds", value),
+            Self::Slots(value) => ("slots", value),
+        }
+    }
+}
+
+/// One auto-claim target: a key the node's wallet tracks, and the balance it should reach.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClaimTarget {
+    /// Lowercase hex.
+    pub public_key: String,
+    pub threshold: u64,
+}
+
+/// The config's `pow:` section. A missing field is the node's default.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PowSettings {
+    /// Ticket-search threads; `None` (`null`) is one per CPU.
+    pub max_threads: Option<u64>,
+    /// Search attempts in flight per block.
+    pub max_tickets_per_block: u64,
+    pub tick: ClaimTick,
+    /// Empty: auto-claim stays off.
+    pub targets: Vec<ClaimTarget>,
+}
+
+impl Default for PowSettings {
+    fn default() -> Self {
+        Self {
+            max_threads: Some(1),
+            max_tickets_per_block: 1,
+            tick: ClaimTick::default(),
+            targets: Vec::new(),
+        }
+    }
+}
+
+impl PowSettings {
+    /// `threads 1 · 1 ticket/block · claim every 10s · no targets`.
+    pub fn summary(&self, names: &BTreeMap<String, String>) -> String {
+        let threads = self.max_threads.map_or("auto".to_owned(), |n| n.to_string());
+        let targets = if self.targets.is_empty() {
+            "no claim targets (auto-claim off)".to_owned()
+        } else {
+            self.targets
+                .iter()
+                .map(|target| format!("{} ≥ {}", key_label(&target.public_key, names), target.threshold))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        format!(
+            "threads {threads} · {} ticket/block · claim every {} · {targets}",
+            self.max_tickets_per_block,
+            self.tick.label()
+        )
+    }
+
+    /// The `pow:` section as YAML, in the layout Basecamp writes.
+    pub fn yaml(&self) -> String {
+        let threads = self.max_threads.map_or("null".to_owned(), |n| n.to_string());
+        let (unit, value) = self.tick.unit();
+        let mut yaml = format!(
+            "pow:\n  mining:\n    max_threads: {threads}\n    max_tickets_per_block: {}\n  auto_claim:\n    \
+             tick:\n      unit: {unit}\n      value: {value}\n",
+            self.max_tickets_per_block
+        );
+        if self.targets.is_empty() {
+            yaml.push_str("    targets: []\n");
+        } else {
+            yaml.push_str("    targets:\n");
+            for target in &self.targets {
+                yaml.push_str(&format!(
+                    "    - public_key: {}\n      threshold: {}\n",
+                    target.public_key, target.threshold
+                ));
+            }
+        }
+        yaml
+    }
+
+    /// The `targets` form field's text: `PoWClaim=1000000, …`.
+    pub fn targets_text(&self, names: &BTreeMap<String, String>) -> String {
+        self.targets
+            .iter()
+            .map(|target| format!("{}={}", names.get(&target.public_key).unwrap_or(&target.public_key), target.threshold))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// A key's keystore name, else its short hex.
+fn key_label(hex: &str, names: &BTreeMap<String, String>) -> String {
+    names.get(hex).cloned().unwrap_or_else(|| jobs::short(hex))
+}
+
+/// A YAML number, or a number in a string.
+fn yaml_u64(value: &serde_yaml::Value) -> Option<u64> {
+    value.as_u64().or_else(|| value.as_str()?.trim().parse().ok())
+}
+
+/// The `pow:` section of a config's text.
+pub fn parse_pow_settings(text: &str) -> anyhow::Result<PowSettings> {
+    let document: serde_yaml::Value = serde_yaml::from_str(text).context("the config isn't YAML")?;
+    let mut settings = PowSettings::default();
+    let Some(pow) = document.get("pow").filter(|pow| !pow.is_null()) else {
+        return Ok(settings);
+    };
+    if let Some(mining) = pow.get("mining") {
+        match mining.get("max_threads") {
+            None => {}
+            Some(serde_yaml::Value::Null) => settings.max_threads = None,
+            Some(value) => {
+                settings.max_threads =
+                    Some(yaml_u64(value).ok_or_else(|| anyhow!("pow.mining.max_threads isn't a number"))?);
+            }
+        }
+        if let Some(value) = mining.get("max_tickets_per_block") {
+            settings.max_tickets_per_block = yaml_u64(value)
+                .ok_or_else(|| anyhow!("pow.mining.max_tickets_per_block isn't a number"))?;
+        }
+    }
+    if let Some(claim) = pow.get("auto_claim") {
+        if let Some(tick) = claim.get("tick") {
+            let value = tick
+                .get("value")
+                .and_then(yaml_u64)
+                .ok_or_else(|| anyhow!("pow.auto_claim.tick.value isn't a number"))?;
+            settings.tick = match tick.get("unit").and_then(serde_yaml::Value::as_str) {
+                Some("slots") => ClaimTick::Slots(value),
+                Some("seconds") | None => ClaimTick::Seconds(value),
+                Some(other) => bail!("pow.auto_claim.tick.unit {other:?}"),
+            };
+        }
+        if let Some(targets) = claim.get("targets").and_then(serde_yaml::Value::as_sequence) {
+            for target in targets {
+                let public_key = target
+                    .get("public_key")
+                    .and_then(serde_yaml::Value::as_str)
+                    .ok_or_else(|| anyhow!("a claim target without a public_key"))?
+                    .trim_start_matches("0x")
+                    .to_ascii_lowercase();
+                let threshold = target
+                    .get("threshold")
+                    .and_then(yaml_u64)
+                    .ok_or_else(|| anyhow!("claim target {public_key}: no threshold"))?;
+                settings.targets.push(ClaimTarget { public_key, threshold });
+            }
+        }
+    }
+    Ok(settings)
+}
+
+fn read_pow_config(config: &Path) -> Result<PowSettings, String> {
+    let text = std::fs::read_to_string(config).map_err(|error| format!("reading {}: {error}", config.display()))?;
+    parse_pow_settings(&text).map_err(|error| format!("{error:#}"))
+}
+
+/// `text` with its top-level `pow:` section swapped for `block`, every other line untouched; the
+/// section is added at the end when there is none. The section runs from the `pow:` line to the
+/// last indented line before the next top-level key (comments and blank lines after it stay).
+pub fn replace_pow_block(text: &str, block: &str) -> String {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let Some(start) = lines.iter().position(|line| line.starts_with("pow:")) else {
+        let mut out = text.to_owned();
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(block);
+        return out;
+    };
+    let inline = lines[start]["pow:".len()..].trim();
+    let mut end = start + 1;
+    if inline.is_empty() || inline.starts_with('#') {
+        for (index, line) in lines.iter().enumerate().skip(start + 1) {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if line.starts_with([' ', '\t']) {
+                end = index + 1;
+            } else {
+                break;
+            }
+        }
+    }
+    let mut out: String = lines[..start].concat();
+    out.push_str(block);
+    out.push_str(&lines[end..].concat());
+    out
+}
+
+/// What the PoW form asks for, as typed.
+#[derive(Clone, Debug)]
+pub struct PowForm {
+    pub threads: String,
+    pub tickets: String,
+    pub tick: String,
+    /// `PoWClaim=1000000, <hex>=500`; empty: none.
+    pub targets: String,
+}
+
+/// A planned rewrite of the config's `pow:` section.
+#[derive(Clone, Debug)]
+pub struct PowWrite {
+    pub config: PathBuf,
+    /// The file as planned against: the write refuses when it changed since.
+    pub before: String,
+    pub after: String,
+}
+
+impl PowWrite {
+    pub fn backup(&self) -> PathBuf {
+        PathBuf::from(format!("{}.bak", self.config.display()))
+    }
+}
+
+/// The settings a form asks for. Keys are hex or keystore names.
+pub fn pow_settings_from(form: &PowForm, names: &BTreeMap<String, String>) -> anyhow::Result<PowSettings> {
+    let whole = |what: &str, text: &str| -> anyhow::Result<u64> {
+        text.trim()
+            .replace('_', "")
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| anyhow!("{what} must be a whole number above 0, not {text:?}"))
+    };
+    let threads = form.threads.trim();
+    let max_threads = if threads.eq_ignore_ascii_case("auto") {
+        None
+    } else {
+        Some(whole("threads", threads)?)
+    };
+    let mut targets: Vec<ClaimTarget> = Vec::new();
+    for entry in form.targets.split([',', '\n']).map(str::trim).filter(|entry| !entry.is_empty()) {
+        let (key, threshold) = entry
+            .split_once('=')
+            .ok_or_else(|| anyhow!("claim target {entry:?}: write it key=threshold, e.g. PoWClaim=1000000"))?;
+        let public_key = resolve_address(key, names)?;
+        if targets.iter().any(|target| target.public_key == public_key) {
+            bail!("{} is a claim target twice", key.trim());
+        }
+        targets.push(ClaimTarget {
+            public_key,
+            threshold: whole(&format!("{}'s threshold", key.trim()), threshold)?,
+        });
+    }
+    Ok(PowSettings {
+        max_threads,
+        max_tickets_per_block: whole("tickets per block", &form.tickets)?,
+        tick: ClaimTick::parse(&form.tick)?,
+        targets,
+    })
+}
+
+/// Plans the config's new `pow:` section: the lines to show, and the write, or `None` when the
+/// section already says this. `known` is the node's wallet keys (`wallet_get_known_addresses`),
+/// `None` when the node isn't Online to ask: then only targets the config already has are allowed.
+pub fn plan_pow(
+    config: &Path,
+    form: &PowForm,
+    known: Option<&[String]>,
+) -> anyhow::Result<(Vec<String>, Option<PowWrite>)> {
+    let before = std::fs::read_to_string(config).with_context(|| format!("reading {}", config.display()))?;
+    let current = parse_pow_settings(&before)?;
+    let names = names_beside(Some(config));
+    let settings = pow_settings_from(form, &names)?;
+    for target in &settings.targets {
+        let tracked = match known {
+            Some(known) => known.iter().any(|key| key.eq_ignore_ascii_case(&target.public_key)),
+            None if current.targets.iter().any(|old| old.public_key == target.public_key) => true,
+            None => bail!(
+                "the node isn't Online to list the keys its wallet tracks, so a new claim target \
+                 can't be checked (an untracked one stops the node from starting)"
+            ),
+        };
+        if !tracked {
+            bail!(
+                "{} isn't a key the node's wallet tracks (L1 wallets pane): the node would refuse to start",
+                key_label(&target.public_key, &names)
+            );
+        }
+    }
+    let after = replace_pow_block(&before, &settings.yaml());
+    // The new file must read back as these settings, with everything else as it was.
+    let check: serde_yaml::Value = serde_yaml::from_str(&after).context("the rewritten config isn't YAML")?;
+    let old: serde_yaml::Value = serde_yaml::from_str(&before).context("the config isn't YAML")?;
+    let without_pow = |value: &serde_yaml::Value| {
+        let mut value = value.clone();
+        if let Some(map) = value.as_mapping_mut() {
+            map.remove("pow");
+        }
+        value
+    };
+    if parse_pow_settings(&after)? != settings || without_pow(&check) != without_pow(&old) {
+        bail!("rewriting the pow section would change more than it (unusual layout?); edit {} by hand", config.display());
+    }
+    let mut lines = vec![
+        format!("config  {}", config.display()),
+        String::new(),
+        format!("now     {}", current.summary(&names)),
+        format!("after   {}", settings.summary(&names)),
+        String::new(),
+    ];
+    if settings == current {
+        return Ok((lines, None));
+    }
+    lines.push("The pow section becomes:".to_owned());
+    lines.extend(settings.yaml().lines().map(|line| format!("  {line}")));
+    lines.push(String::new());
+    if !settings.targets.is_empty() {
+        lines.push(
+            "Auto-claim pays, each tick, the target furthest below its threshold; once all have \
+             reached theirs it stops, and stops mining with it."
+                .to_owned(),
+        );
+    }
+    let write = PowWrite { config: config.to_owned(), before, after };
+    lines.push(
+        "The node reads this when it starts: it applies once s stops the node and s starts it again \
+         (Online again soon after a short stop, after about an hour's bootstrap after a long one)."
+            .to_owned(),
+    );
+    lines.push(String::new());
+    lines.push(format!("Enter writes the file; the old one is kept as {}.", write.backup().display()));
+    Ok((lines, Some(write)))
+}
+
+/// Writes a planned `pow:` section: the old file to `<config>.bak`, the new one through a rename.
+pub async fn write_pow(ctx: &mut Ctx, write: &PowWrite) -> anyhow::Result<()> {
+    let now = std::fs::read_to_string(&write.config).with_context(|| format!("reading {}", write.config.display()))?;
+    if now != write.before {
+        bail!("{} changed since the plan: p plans again", write.config.display());
+    }
+    let backup = write.backup();
+    std::fs::write(&backup, &now).with_context(|| format!("writing {}", backup.display()))?;
+    let tmp = PathBuf::from(format!("{}.prog-tui.tmp", write.config.display()));
+    std::fs::write(&tmp, &write.after).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::set_permissions(&tmp, std::fs::metadata(&write.config)?.permissions())?;
+    std::fs::rename(&tmp, &write.config).with_context(|| format!("replacing {}", write.config.display()))?;
+    ctx.log(format!("✓ wrote the pow section of {} (the old file: {})", write.config.display(), backup.display()));
+    ctx.log("it applies when the node next starts: s stops it, s starts it");
+    Ok(())
+}
+
+/// A switch on the running node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PowSwitch {
+    StartMining,
+    StopMining,
+    StartAutoClaim,
+    StopAutoClaim,
+}
+
+impl PowSwitch {
+    pub fn method(self) -> &'static str {
+        match self {
+            Self::StartMining => "pow_start_mining",
+            Self::StopMining => "pow_stop_mining",
+            Self::StartAutoClaim => "pow_start_auto_claim",
+            Self::StopAutoClaim => "pow_stop_auto_claim",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::StartMining => "start mining",
+            Self::StopMining => "stop mining",
+            Self::StartAutoClaim => "arm auto-claim",
+            Self::StopAutoClaim => "disarm auto-claim",
+        }
+    }
+}
+
+/// `pow_status`'s `is_mining` and `auto_claim.is_armed`.
+pub fn pow_flags(pow: &Value) -> (Option<bool>, Option<bool>) {
+    (
+        pow.get("is_mining").and_then(Value::as_bool),
+        pow.get("auto_claim").and_then(|claim| claim.get("is_armed")).and_then(Value::as_bool),
+    )
+}
+
+/// Flips a switch on the running node, then reports what `pow_status` says.
+pub async fn pow_switch(ctx: &mut Ctx, switch: PowSwitch) -> anyhow::Result<()> {
+    let program = logosctl_path().ok_or_else(|| anyhow!("logosctl isn't on PATH"))?;
+    let method = switch.method();
+    let label = format!("logosctl call {MODULE} {method}");
+    let (_, out) = run(ctx, &label, &program, &["call", MODULE, method], TIMEOUT).await?;
+    let reply: Value = serde_json::from_str(out.trim())
+        .map_err(|_| anyhow!("logosctl's reply isn't JSON: {}", first_line(&out).unwrap_or("")))?;
+    if let Some(error) = top_level_error(&reply) {
+        bail!("{error}");
+    }
+    call_value(&reply).map_err(|error| anyhow!("{method}: {error}"))?;
+    let status = call(&program, "pow_status", &[]).await.map_err(|error| anyhow!("pow_status: {error}"))?;
+    let (mining, armed) = pow_flags(&status);
+    let show = |flag: Option<bool>, yes: &str, no: &str| match flag {
+        Some(true) => yes.to_owned(),
+        Some(false) => no.to_owned(),
+        None => "?".to_owned(),
+    };
+    ctx.log(format!(
+        "✓ L1: mining {} · auto-claim {}",
+        show(mining, "on", "off"),
+        show(armed, "armed", "off")
+    ));
+    if switch == PowSwitch::StartAutoClaim && armed == Some(false) {
+        let no_targets = status
+            .get("auto_claim")
+            .and_then(|claim| claim.get("targets"))
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty);
+        if no_targets {
+            bail!(
+                "auto-claim didn't arm: the node has no claim targets. p sets them in the config; \
+                 the node reads them when it starts"
+            );
+        }
+        bail!("auto-claim didn't arm (the node's log may say why)");
+    }
+    Ok(())
+}
+
 /// `show_config <path>`: the node's config as the module reads it, secrets shown as `<secret>`.
 pub async fn show_config(config: &Path) -> Result<String, String> {
     let program = logosctl_path().ok_or("logosctl isn't on PATH")?;
@@ -1403,5 +1889,128 @@ mod tests {
         };
         assert_eq!(status.total(), Some(15));
         assert_eq!(L1Status::default().total(), None);
+    }
+
+    /// Basecamp's `user_config.yaml` (0.3.5), shortened.
+    const BASECAMP_CONFIG: &str = "version: 0.3.5\nnetwork:\n  backend:\n    initial_peers:\n    - /ip4/1.2.3.4/udp/50001/quic-v1\nstate:\n  base_folder: /x/state\npow:\n  mining:\n    max_threads: 1\n    max_tickets_per_block: 1\n  auto_claim:\n    tick:\n      unit: seconds\n      value: 10\n    targets: []\n";
+
+    const KEY_A: &str = "82da47b18aa86d6b18e786145f3d154383a7aa80af0e821e715c29199571670a";
+    const KEY_B: &str = "9388f8d30cad0448ae2a145e0e3f0951b598ca06dfe48b23d3b2c49bd3a81e18";
+
+    #[test]
+    fn parses_claim_ticks() {
+        assert_eq!(ClaimTick::parse("10").unwrap(), ClaimTick::Seconds(10));
+        assert_eq!(ClaimTick::parse("30s").unwrap(), ClaimTick::Seconds(30));
+        assert_eq!(ClaimTick::parse("5 slots").unwrap(), ClaimTick::Slots(5));
+        assert_eq!(ClaimTick::parse(" 1 Slot ").unwrap(), ClaimTick::Slots(1));
+        assert!(ClaimTick::parse("0s").is_err());
+        assert!(ClaimTick::parse("10m").is_err());
+        assert!(ClaimTick::parse("s").is_err());
+        assert_eq!(ClaimTick::Slots(5).label(), "5 slots");
+        assert_eq!(ClaimTick::parse(&ClaimTick::Seconds(10).label()).unwrap(), ClaimTick::Seconds(10));
+    }
+
+    #[test]
+    fn reads_the_pow_section() {
+        assert_eq!(parse_pow_settings(BASECAMP_CONFIG).unwrap(), PowSettings::default());
+        // No section: the node's defaults.
+        assert_eq!(parse_pow_settings("version: 0.3.5\n").unwrap(), PowSettings::default());
+        let text = format!(
+            "pow:\n  mining:\n    max_threads: null\n  auto_claim:\n    tick: {{unit: slots, value: 3}}\n    targets:\n    - public_key: 0x{}\n      threshold: '500'\n",
+            KEY_A.to_ascii_uppercase()
+        );
+        let settings = parse_pow_settings(&text).unwrap();
+        assert_eq!(settings.max_threads, None);
+        assert_eq!(settings.max_tickets_per_block, 1);
+        assert_eq!(settings.tick, ClaimTick::Slots(3));
+        assert_eq!(settings.targets, vec![ClaimTarget { public_key: KEY_A.to_owned(), threshold: 500 }]);
+    }
+
+    #[test]
+    fn writes_settings_that_read_back() {
+        let settings = PowSettings {
+            max_threads: None,
+            max_tickets_per_block: 2,
+            tick: ClaimTick::Slots(4),
+            targets: vec![
+                ClaimTarget { public_key: KEY_A.to_owned(), threshold: 1_000_000 },
+                ClaimTarget { public_key: KEY_B.to_owned(), threshold: 5 },
+            ],
+        };
+        assert_eq!(parse_pow_settings(&settings.yaml()).unwrap(), settings);
+        // The defaults write what Basecamp wrote, line for line.
+        assert!(BASECAMP_CONFIG.ends_with(&PowSettings::default().yaml()));
+    }
+
+    #[test]
+    fn replaces_only_the_pow_section() {
+        let block = "pow:\n  new: 1\n";
+        // At the end.
+        let out = replace_pow_block(BASECAMP_CONFIG, block);
+        assert_eq!(out, format!("{}{block}", &BASECAMP_CONFIG[..BASECAMP_CONFIG.find("pow:").unwrap()]));
+        // In the middle: what follows, and the comment and blank line before it, stay.
+        let text = "a: 1\npow:\n  mining:\n    max_threads: 1\n\n# next\nb:\n  c: 2\n";
+        assert_eq!(replace_pow_block(text, block), "a: 1\npow:\n  new: 1\n\n# next\nb:\n  c: 2\n");
+        // A comment inside the section goes with it.
+        let text = "pow:\n  # threads\n  mining: {}\nb: 1\n";
+        assert_eq!(replace_pow_block(text, block), "pow:\n  new: 1\nb: 1\n");
+        // An inline value.
+        assert_eq!(replace_pow_block("pow: {}\nb: 1\n", block), "pow:\n  new: 1\nb: 1\n");
+        // None yet: added at the end.
+        assert_eq!(replace_pow_block("a: 1", block), "a: 1\npow:\n  new: 1\n");
+        // `power:` isn't `pow:`... but starts with it; a nested `pow:` isn't top-level.
+        assert_eq!(replace_pow_block("x:\n  pow: 1\n", block), "x:\n  pow: 1\npow:\n  new: 1\n");
+    }
+
+    #[test]
+    fn form_settings_resolve_names() {
+        let names = keystore_names(&format!("public_keys:\n  PoWClaim: {KEY_A}\n  LeaderFunding: {KEY_B}\n"));
+        let form = |threads: &str, targets: &str| PowForm {
+            threads: threads.to_owned(),
+            tickets: "1".to_owned(),
+            tick: "10s".to_owned(),
+            targets: targets.to_owned(),
+        };
+        let settings = pow_settings_from(&form("auto", "powclaim=1_000_000, leaderfunding = 5"), &names).unwrap();
+        assert_eq!(settings.max_threads, None);
+        assert_eq!(
+            settings.targets,
+            vec![
+                ClaimTarget { public_key: KEY_A.to_owned(), threshold: 1_000_000 },
+                ClaimTarget { public_key: KEY_B.to_owned(), threshold: 5 },
+            ]
+        );
+        assert_eq!(settings.targets_text(&names), "PoWClaim=1000000, LeaderFunding=5");
+        assert!(pow_settings_from(&form("2", ""), &names).unwrap().targets.is_empty());
+        assert!(pow_settings_from(&form("0", ""), &names).is_err());
+        assert!(pow_settings_from(&form("1", "PoWClaim"), &names).is_err());
+        assert!(pow_settings_from(&form("1", "PoWClaim=1, PoWClaim=2"), &names).is_err());
+        assert!(pow_settings_from(&form("1", "Nobody=1"), &names).is_err());
+    }
+
+    #[test]
+    fn plans_a_pow_rewrite() {
+        let dir = std::env::temp_dir().join(format!("prog-tui-pow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("user_config.yaml");
+        std::fs::write(&config, BASECAMP_CONFIG).unwrap();
+        std::fs::write(dir.join("keystore.yaml"), format!("public_keys:\n  PoWClaim: {KEY_A}\n")).unwrap();
+        let form = |targets: &str| PowForm {
+            threads: "1".to_owned(),
+            tickets: "1".to_owned(),
+            tick: "10s".to_owned(),
+            targets: targets.to_owned(),
+        };
+        // Unchanged: nothing to write.
+        assert!(plan_pow(&config, &form(""), None).unwrap().1.is_none());
+        // A new target needs the node's keys to check against.
+        assert!(plan_pow(&config, &form("PoWClaim=100"), None).is_err());
+        assert!(plan_pow(&config, &form("PoWClaim=100"), Some(&[KEY_B.to_owned()])).is_err());
+        let (lines, write) = plan_pow(&config, &form("PoWClaim=100"), Some(&[KEY_A.to_owned()])).unwrap();
+        let write = write.unwrap();
+        assert!(lines.iter().any(|line| line.contains("PoWClaim ≥ 100")));
+        assert!(write.after.starts_with("version: 0.3.5\nnetwork:"));
+        assert_eq!(parse_pow_settings(&write.after).unwrap().targets.len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
