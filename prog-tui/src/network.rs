@@ -9,6 +9,7 @@
 //!     {
 //!       "name": "devnet",
 //!       "channel_id": "0101…01",
+//!       "poll_timeout": "5s",
 //!       "sequencers": ["127.0.0.1:3040", "10.0.0.7", "http://seq.example:3041"]
 //!     }
 //!   ]
@@ -19,6 +20,8 @@
 //! default RPC port, 3040; one without a scheme gets `http://`. `channel_id` is optional: a client
 //! doesn't need it (the wallet only talks to the sequencer's RPC), but when it's given, prog-tui
 //! checks it against the sequencer's `getChannelId`, so a wrong address shows up at once.
+//! `poll_timeout` is optional too: the wallet's `seq_poll_timeout` on this network (see
+//! [`Network::Remote::poll_timeout`]).
 
 use std::{fs, path::Path};
 
@@ -43,6 +46,10 @@ pub enum Network {
         url: String,
         /// The channel id the sequencer should report, as hex, when the file gives one.
         channel_id: Option<String>,
+        /// The wallet's `seq_poll_timeout` here (`5s`, `500ms`, `1m`): how long it sleeps between
+        /// looks for a sent transaction, up to `seq_tx_poll_max_blocks` looks. Set from this on
+        /// every start; `None` is LEZ's debug config's value, which suits 1s blocks.
+        poll_timeout: Option<String>,
     },
 }
 
@@ -89,6 +96,8 @@ struct Entry {
     name: String,
     #[serde(default)]
     channel_id: Option<String>,
+    #[serde(default)]
+    poll_timeout: Option<String>,
     sequencers: Vec<String>,
 }
 
@@ -120,16 +129,38 @@ fn parse(text: &str) -> anyhow::Result<Vec<Network>> {
                 entry.name
             );
         }
+        let poll_timeout = entry
+            .poll_timeout
+            .map(|text| text.trim().to_owned())
+            .filter(|text| !text.is_empty());
+        if let Some(text) = &poll_timeout {
+            anyhow::ensure!(
+                is_duration(text),
+                "{}: poll_timeout must be a duration such as 5s, 500ms or 1m, not {text:?}",
+                entry.name
+            );
+        }
         anyhow::ensure!(!entry.sequencers.is_empty(), "{}: no sequencers listed", entry.name);
         for address in &entry.sequencers {
             networks.push(Network::Remote {
                 name: entry.name.trim().to_owned(),
                 url: rpc_url(address)?,
                 channel_id: channel_id.clone(),
+                poll_timeout: poll_timeout.clone(),
             });
         }
     }
     Ok(networks)
+}
+
+/// A duration the wallet's `humantime` parsing takes: numbers each followed by a unit, e.g. `5s`,
+/// `500ms`, `1m 30s`. A light check, so a typo fails here rather than in every wallet command.
+fn is_duration(text: &str) -> bool {
+    const UNITS: [&str; 8] = ["ms", "s", "sec", "secs", "m", "min", "mins", "h"];
+    text.split_whitespace().all(|part| {
+        let digits = part.find(|c: char| !c.is_ascii_digit()).unwrap_or(part.len());
+        digits > 0 && UNITS.contains(&&part[digits..])
+    }) && !text.trim().is_empty()
 }
 
 /// `10.0.0.7` → `http://10.0.0.7:3040`; `10.0.0.7:3041` → `http://10.0.0.7:3041`; a URL as given,
@@ -186,10 +217,24 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_poll_timeout() {
+        let poll = |json: &str| match &parse(json).unwrap()[0] {
+            Network::Remote { poll_timeout, .. } => poll_timeout.clone(),
+            Network::Local => unreachable!(),
+        };
+        assert_eq!(poll(r#"{"networks": [{"name": "d", "poll_timeout": " 5s ", "sequencers": ["x"]}]}"#).as_deref(), Some("5s"));
+        assert_eq!(poll(r#"{"networks": [{"name": "d", "poll_timeout": "1m 30s", "sequencers": ["x"]}]}"#).as_deref(), Some("1m 30s"));
+        assert_eq!(poll(r#"{"networks": [{"name": "d", "poll_timeout": "", "sequencers": ["x"]}]}"#), None);
+        assert_eq!(poll(r#"{"networks": [{"name": "d", "sequencers": ["x"]}]}"#), None);
+    }
+
+    #[test]
     fn refuses_a_bad_file() {
         assert!(parse("{").is_err());
         assert!(parse(r#"{"networks": [{"name": "d", "sequencers": []}]}"#).is_err());
         assert!(parse(r#"{"networks": [{"name": "d", "channel_id": "12", "sequencers": ["x"]}]}"#).is_err());
+        assert!(parse(r#"{"networks": [{"name": "d", "poll_timeout": "5", "sequencers": ["x"]}]}"#).is_err());
+        assert!(parse(r#"{"networks": [{"name": "d", "poll_timeout": "five s", "sequencers": ["x"]}]}"#).is_err());
         // No channel id is fine.
         assert_eq!(parse(r#"{"networks": [{"name": "d", "sequencers": ["x"]}]}"#).unwrap().len(), 1);
     }

@@ -972,8 +972,8 @@ pub async fn plan_bridge(ctx: &mut Ctx, request: BridgeRequest) -> anyhow::Resul
     }
     lines.push(String::new());
     lines.push(
-        "Enter sends, then waits for the deposit to land in an L1 block. LEZ credits it once L1 \
-         finalises that block: 120 blocks, about an hour."
+        "Enter sends, then waits for the deposit to land in an L1 block. LEZ credits it shortly \
+         after (under 30s in practice)."
             .to_owned(),
     );
     ctx.send(Msg::Plan {
@@ -1045,7 +1045,7 @@ pub async fn bridge(ctx: &mut Ctx, call: &BridgeCall) -> anyhow::Result<()> {
     .await;
     match landed {
         Some(_) => ctx.log(format!(
-            "✓ deposit in an L1 block. LEZ credits Public/{} once L1 finalises it: 120 blocks, about an hour",
+            "✓ deposit in an L1 block. LEZ credits Public/{} shortly after (under 30s in practice)",
             jobs::short(&call.request.to)
         )),
         None => ctx.log(

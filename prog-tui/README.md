@@ -26,6 +26,7 @@ cargo run --release -- local     # or skip it: a network's key, as the selector'
     {
       "name": "local-devnet",
       "channel_id": "0101010101010101010101010101010101010101010101010101010101010101",
+      "poll_timeout": "5s",
       "sequencers": ["127.0.0.1:3040", "10.0.0.7", "http://seq.example:3041"]
     }
   ]
@@ -34,10 +35,11 @@ cargo run --release -- local     # or skip it: a network's key, as the selector'
 
 - **Addresses:** an IP or host, with an optional port (default 3040, the sequencer's RPC port) and an optional `http://` or `https://`.
 - **The channel id isn't needed** to use the network: the wallet only talks to the sequencer's RPC. When it's given, prog-tui compares it with the sequencer's `getChannelId`, and the status bar shows `channel ✓`, or the channel it found in red. A wrong address shows up at once, rather than as accounts that aren't there.
+- **`poll_timeout` is optional:** the wallet's `seq_poll_timeout` on that network (`5s`, `500ms`, `1m`). The wallet waits for a sent transaction by sleeping this long between looks, up to `seq_tx_poll_max_blocks` (60) looks, so about 60 × it in all. Leave it out for a chain with 1s blocks: the wallet then gets LEZ's debug config's value (1s). A chain with blocks a minute apart wants `5s` (about 5 minutes); with 1s, the wallet gives up on a transaction that then lands, as `Transaction not found in preconfigured amount of blocks`.
 - **The file as checked in** lists LEZ's four-sequencer docker devnet (`docker-compose.yml` in LEZ publishes their RPCs on ports 3040–3043, on channel `0101…`). Edit it for your devnet's addresses. LEZ's local standalone sequencer also listens on 3040, so with it running, the first devnet entry reaches it.
 
 **On a remote network:**
-- **Its own wallet and state:** a wallet home at `.state/networks/<key>/wallet`, made from LEZ's debug `wallet_config.json` with `sequencer_addr` set to the chosen sequencer (later edits to that file are kept), and its own `PAYER`, `ACCOUNT`, deployments, `env.sh` and job logs in `.state/networks/<key>/`. The checkouts and the wallet password are shared.
+- **Its own wallet and state:** a wallet home at `.state/networks/<key>/wallet`, made from LEZ's debug `wallet_config.json` with `sequencer_addr` set to the chosen sequencer and `seq_poll_timeout` to the network's `poll_timeout`. prog-tui sets those two on every start, so change them in `networks.json`; edits to the rest of that file are kept. and its own `PAYER`, `ACCOUNT`, deployments, `env.sh` and job logs in `.state/networks/<key>/`. The checkouts and the wallet password are shared.
 - **No sequencer control:** `s` (start/stop) and `R` (reset) are refused, and `e` points at the network's `env.sh` instead.
 - **`i`** imports the two test accounts into the network's wallet. LEZ's docker devnet funds them at genesis, as the local chain does; another devnet may not.
 - **`W`** builds, checks the sequencer is healthy and on the configured channel, then runs the rest of the walkthrough there. Nothing is reset, and the accounts it creates get no labels, so it can run again.
@@ -112,7 +114,7 @@ Keep LEZ at the tag lez-programs pins (`v0.4.0-rc3` today), and spel on its `ref
 
 ## The L1 view
 
-`2` shows the Logos blockchain node (the L1) that the `logosctl` daemon runs as `blockchain_module`. Its data comes from running `logosctl --json …` (from PATH; `LOGOSCTL_CONFIG_DIR` is honoured, as logosctl itself does). It refreshes every 5s while shown (one call at a time), and asks only the daemon every 30s otherwise, for the tab's dot. The L1 is the same whichever LEZ network you chose. Six keys act on it, `s`, `m`, `a`, `p`, `b` and `t`; the rest only read.
+`2` shows the Logos blockchain node (the L1) that the `logosctl` daemon runs as `blockchain_module`. Its data comes from running `logosctl --json …` (from PATH; `LOGOSCTL_CONFIG_DIR` is honoured, as logosctl itself does). It refreshes every 5s while shown (one call at a time), and asks only the daemon every 10s otherwise, for the tab's dot. The L1 is the same whichever LEZ network you chose. Six keys act on it, `s`, `m`, `a`, `p`, `b` and `t`; the rest only read.
 
 - **L1 daemon:** logosctl's path and session directory, the daemon's state, pid and version, and each module's state, version, uptime, memory and CPU. When the daemon or the module isn't running, it shows the commands to start them.
 - **L1 node:** sync mode (`Online` once synced), height, slot and LIB slot, tip, peers, epoch and genesis; mining, auto-claim with its tick and targets (each with its balance), claimable tickets and vouchers. Then the config file and its `pow:` settings, and the selected wallet's full address.
@@ -153,7 +155,7 @@ logosctl 1.0.0's daemon has segfaulted (in `libQt6RemoteObjects`) while calls to
       ```sh
       logosctl call blockchain_module channel_deposit_with_notes str:<channel> 'json:["<note>"]' str:<metadata> str:<from> 'json:["<from>"]' str:<max fee> str:
       ```
-4. The job waits for the deposit to land in an L1 block (its note is spent then). LEZ credits it once L1 finalises that block: 120 blocks, about an hour. The Accounts pane shows it then.
+4. The job waits for the deposit to land in an L1 block (its note is spent then). LEZ credits it shortly after, in practice under 30s. The Accounts pane shows it then.
 
 The module's other deposit call, `channel_deposit`, takes an amount and splits the note itself, but it pays no fee ("the platform gas price is currently 0", its code says); deposits sent with it stayed in the mempool and never landed, while fee-paying transfers did. Arguments go as `str:…` (and lists as `json:[…]`): logosctl guesses types, so a bare `1` would go as a number, and the module's amounts are text, which fails with `success:false` and no reason.
 

@@ -805,7 +805,7 @@ pub fn draw_selector(frame: &mut Frame, choices: &[Network], selected: usize, er
                 Span::raw("local standalone").bold(),
                 Span::raw("  127.0.0.1:3040; prog-tui starts, stops and resets it").dark_gray(),
             ]),
-            Network::Remote { name, url, channel_id } => Line::from(vec![
+            Network::Remote { name, url, channel_id, .. } => Line::from(vec![
                 Span::raw(number),
                 Span::raw(name.clone()).magenta().bold(),
                 Span::raw(format!("  {url}")),

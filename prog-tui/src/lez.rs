@@ -52,9 +52,11 @@ impl Lez {
     }
 
     /// Makes `home` a wallet home for the sequencer at `url`: LEZ's debug `wallet_config.json`
-    /// with `sequencer_addr` set to `url`. Keeps the rest of an existing config, so a hand edit
-    /// (a shorter `seq_poll_timeout`, say) survives. Never touches `storage.json`.
-    pub fn prepare_wallet_home(&self, home: &Path, url: &str) -> anyhow::Result<()> {
+    /// with `sequencer_addr` set to `url` and `seq_poll_timeout` to `poll_timeout` (the network's
+    /// in `networks.json`), else the debug config's. Those two are set on every start, so
+    /// `networks.json` is where they change; the rest of an existing config is kept, hand edits
+    /// included. Never touches `storage.json`.
+    pub fn prepare_wallet_home(&self, home: &Path, url: &str, poll_timeout: Option<&str>) -> anyhow::Result<()> {
         fs::create_dir_all(home)?;
         let path = home.join("wallet_config.json");
         let template = if path.is_file() {
@@ -66,6 +68,18 @@ impl Lez {
             .map_err(|error| anyhow::anyhow!("reading {}: {error}", template.display()))?;
         let mut config: serde_json::Value = serde_json::from_str(&text)?;
         config["sequencer"]["sequencer_addr"] = serde_json::Value::String(url.to_owned());
+        // The wallet waits for a sent transaction by sleeping `seq_poll_timeout` between looks, at
+        // most `seq_tx_poll_max_blocks` of them (the retries within a look don't sleep). The debug
+        // config's suits the local chain's 1s blocks; a network with slower blocks sets its own.
+        let debug_poll = || {
+            fs::read_to_string(self.debug_wallet_home().join("wallet_config.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .and_then(|debug| debug["seq_poll_timeout"].as_str().map(str::to_owned))
+        };
+        if let Some(poll) = poll_timeout.map(str::to_owned).or_else(debug_poll) {
+            config["seq_poll_timeout"] = serde_json::Value::String(poll);
+        }
         let updated = serde_json::to_string_pretty(&config)?;
         if fs::read_to_string(&path).ok().as_deref() != Some(updated.as_str()) {
             fs::write(&path, updated)?;

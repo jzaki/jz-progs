@@ -488,7 +488,7 @@ impl App {
         let every = match (full, unanswered) {
             (true, false) => 5,
             (true, true) => 60,
-            (false, _) => 30,
+            (false, _) => 10,
         };
         if !self.refreshing.l1 && due(self.last_l1, every) {
             self.refreshing.l1 = true;
@@ -2104,9 +2104,9 @@ fn connect(
             let rpc = Rpc::new(lez.sequencer_url());
             (lez, rpc, None)
         }
-        Network::Remote { url, .. } => {
+        Network::Remote { url, poll_timeout, .. } => {
             let home = state_dir.join("wallet");
-            let error = lez.prepare_wallet_home(&home, url).err();
+            let error = lez.prepare_wallet_home(&home, url, poll_timeout.as_deref()).err();
             (lez.with_wallet_home(home), Rpc::new(url.clone()), error)
         }
     }
