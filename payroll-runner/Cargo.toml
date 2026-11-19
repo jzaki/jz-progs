@@ -1,0 +1,34 @@
+[package]
+name = "payroll-runner"
+version = "0.1.0"
+edition = "2024"
+description = "Drive the payroll example (example_progs/payroll) with private transactions on a LEZ chain"
+publish = false
+
+# Its own workspace: it builds against a LEZ checkout next to jz-progs, by path, with LEZ's
+# Cargo.lock and toolchain (as lez-dryrun does). No CLI sends a private call to a custom program
+# at LEZ v0.4.0-rc3, so this drives the wallet library directly.
+[workspace]
+
+[dependencies]
+wallet = { path = "../../logos-execution-zone/lez/wallet" }
+common = { path = "../../logos-execution-zone/lez/common" }
+lee = { path = "../../logos-execution-zone/lee/state_machine" }
+lee_core = { path = "../../logos-execution-zone/lee/state_machine/core", features = ["host"] }
+# The local chain's genesis private accounts, to bootstrap private funds (`import-genesis-private`).
+testnet_initial_state = { path = "../../logos-execution-zone/lez/testnet_initial_state" }
+payroll_core = { path = "../example_progs/payroll/core" }
+
+anyhow = "1.0.98"
+borsh = "1.5.7"
+clap = { version = "4.5.42", features = ["derive", "env"] }
+tokio = { version = "1.50", features = ["macros", "rt-multi-thread"] }
+
+# payroll_core names lee_core by its git tag, as lez-programs' crates do. This makes it the same
+# crate as the path one above, so their AccountIds are one type.
+[patch."https://github.com/logos-blockchain/logos-execution-zone.git"]
+lee_core = { path = "../../logos-execution-zone/lee/state_machine/core" }
+
+# As LEZ's: an unoptimized executor runs guests slowly.
+[profile.dev]
+opt-level = 1
