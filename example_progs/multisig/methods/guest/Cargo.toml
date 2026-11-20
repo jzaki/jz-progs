@@ -1,0 +1,50 @@
+[package]
+name = "multisig-guest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[profile.release]
+debug = 0
+strip = "symbols"
+
+# lez-programs' guest lints (programs/token/methods/guest/Cargo.toml).
+[lints.rust]
+rust_2018_idioms = { level = "deny", priority = -1 }
+unsafe_code = "deny"
+
+[lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious  = { level = "deny", priority = -1 }
+perf        = { level = "deny", priority = -1 }
+style       = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+allow_attributes = "warn"
+allow_attributes_without_reason = "deny"
+arithmetic_side_effects = "deny"
+indexing_slicing = "deny"
+as_conversions = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+large_enum_variant = "deny"
+wildcard_enum_match_arm = "deny"
+module_name_repetitions = "allow"
+similar_names = "allow"
+
+[[bin]]
+name = "multisig"
+path = "src/bin/multisig.rs"
+
+[dependencies]
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3" }
+risc0-zkvm = { version = "=3.0.5", default-features = false }
+# The risc0 guest toolchain ships rustc 1.88; ruint 1.18+ needs 1.90. Same pin as lez-programs'
+# guests.
+ruint = { version = "=1.17.0", default-features = false }
+multisig_program = { path = "../..", package = "multisig_program" }
