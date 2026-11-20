@@ -1435,7 +1435,7 @@ impl App {
             "Native token transfer → wallet auth-transfer send".to_owned(),
             vec![
                 ("from".to_owned(), payer),
-                ("to".to_owned(), to),
+                ("to\nan account id, or a new account's public key (64 hex)".to_owned(), to),
                 ("amount".to_owned(), "1000".to_owned()),
             ],
             FormAction::Transfer,
@@ -1687,8 +1687,8 @@ impl App {
             }
             FormAction::Transfer => {
                 let from = jobs::bare_account_id(&values[0]).to_owned();
-                let to = jobs::bare_account_id(&values[1]).to_owned();
-                if from.is_empty() || to.is_empty() {
+                let to = jobs::Recipient::parse(&values[1]);
+                if from.is_empty() || to.id().is_empty() {
                     self.push_log("✗ from and to are both needed".to_owned());
                     return;
                 }
@@ -1696,6 +1696,9 @@ impl App {
                     self.push_log(format!("✗ amount must be a whole number above 0, not {:?}", values[2]));
                     return;
                 };
+                if let jobs::Recipient::Key { id, .. } = &to {
+                    self.push_log(format!("to: that pk's account is Public/{id}"));
+                }
                 self.spawn_job("transfer", move |mut ctx| async move {
                     jobs::transfer(&mut ctx, &from, &to, amount).await
                 });

@@ -1340,7 +1340,15 @@ async fn balance(rpc: &Rpc, id: &str) -> anyhow::Result<Option<u128>> {
 }
 
 /// Sends `amount` of the native token with `wallet auth-transfer send`, then checks both balances.
-pub async fn transfer(ctx: &mut Ctx, from: &str, to: &str, amount: u128) -> anyhow::Result<()> {
+/// A recipient given by its public key goes out with `--to-pk`, so it needn't be on chain or in
+/// the wallet.
+pub async fn transfer(ctx: &mut Ctx, from: &str, to: &Recipient, amount: u128) -> anyhow::Result<()> {
+    let by_key = matches!(to, Recipient::Key { .. });
+    let to_arg = match to {
+        Recipient::Id(id) => ["--to".to_owned(), format!("Public/{id}")],
+        Recipient::Key { pk, .. } => ["--to-pk".to_owned(), pk.clone()],
+    };
+    let to = to.id();
     if from == to {
         bail!("from and to are the same account");
     }
@@ -1368,12 +1376,13 @@ pub async fn transfer(ctx: &mut Ctx, from: &str, to: &str, amount: u128) -> anyh
         );
     }
     let recipient_before = balance(&ctx.rpc, to).await?;
-    if recipient_before.is_none() && !in_wallet(to) {
+    if recipient_before.is_none() && !in_wallet(to) && !by_key {
         // The engine only runs an actor on an account that is on chain, signs, or comes with
-        // evidence; the wallet can only give evidence for accounts it holds keys for.
+        // evidence; the wallet can only give evidence for accounts it holds keys for, or whose
+        // public key it's given.
         bail!(
             "{} isn't on chain and isn't in this wallet: an unused account needs its public key \
-             (`wallet auth-transfer send --to-pk <pk>`)",
+             (enter the 64-hex pk as `to`)",
             short(to)
         );
     }
@@ -1387,13 +1396,14 @@ pub async fn transfer(ctx: &mut Ctx, from: &str, to: &str, amount: u128) -> anyh
         "send",
         "--from",
         &format!("Public/{from}"),
-        "--to",
-        &format!("Public/{to}"),
+        &to_arg[0],
+        &to_arg[1],
         "--amount",
         &amount_text,
     ]);
+    let via = if by_key { " (by pk)" } else { "" };
     ctx.run_ok(
-        &format!("wallet auth-transfer send {amount} {} → {}", short(from), short(to)),
+        &format!("wallet auth-transfer send {amount} {} → {}{via}", short(from), short(to)),
         command,
     )
     .await?;
@@ -1429,6 +1439,45 @@ pub async fn transfer(ctx: &mut Ctx, from: &str, to: &str, amount: u128) -> anyh
         }
         TransferOutcome::Unchanged => bail!("neither balance changed within a minute"),
     }
+}
+
+/// A transfer's recipient: an account id, or a public account's public key (32 bytes of hex, as
+/// `wallet account get --keys` prints it). Only a key lets an unused account outside this wallet
+/// receive: the wallet sends it with `--to-pk`, as the evidence that names the account.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Recipient {
+    Id(String),
+    Key { pk: String, id: String },
+}
+
+impl Recipient {
+    /// 64 hex characters (optionally `0x`) are a public key; anything else is an account id.
+    /// The two can't be confused: base58 of 32 bytes is at most 44 characters.
+    pub fn parse(text: &str) -> Self {
+        let text = text.trim();
+        let hex = text.strip_prefix("0x").unwrap_or(text).to_ascii_lowercase();
+        match crate::rpc::unhex(&hex).and_then(|bytes| <[u8; 32]>::try_from(bytes).ok()) {
+            Some(pk) => Self::Key { id: public_account_id(&pk), pk: hex },
+            None => Self::Id(bare_account_id(text).to_owned()),
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Id(id) | Self::Key { id, .. } => id,
+        }
+    }
+}
+
+/// `AccountId::from(&PublicKey)` (`lee/state_machine/src/signature/public_key.rs`):
+/// `SHA-256(PREFIX ‖ pk)`, as base58.
+pub fn public_account_id(pk: &[u8; 32]) -> String {
+    use sha2::{Digest as _, Sha256};
+    const PREFIX: &[u8; 32] = b"/LEE/v0.3/AccountId/Public/\x00\x00\x00\x00\x00";
+    let mut hasher = Sha256::new();
+    hasher.update(PREFIX);
+    hasher.update(pk);
+    bs58::encode(hasher.finalize()).into_string()
 }
 
 /// An account id as typed: trimmed, with an optional `Public/` prefix removed.
@@ -1603,6 +1652,18 @@ mod tests {
         assert_eq!(parse_amount("0"), None);
         assert_eq!(parse_amount("-5"), None);
         assert_eq!(parse_amount("ten"), None);
+    }
+
+    #[test]
+    fn parses_a_recipient_by_key() {
+        // From `wallet account new public`: "account_id Public/2iLg… With pk 0f8d…".
+        let pk = "0f8dd67e32040669f1f1471a762bacc8bef3e124959b3503b3f4a3d6ca7dbe21";
+        let id = "2iLgotABUSD6YSHvcgDiAfXGZijRfrKTPx6RTScphkTQ";
+        let key = Recipient::Key { pk: pk.to_owned(), id: id.to_owned() };
+        assert_eq!(Recipient::parse(pk), key);
+        assert_eq!(Recipient::parse(&format!(" 0x{} ", pk.to_ascii_uppercase())), key);
+        assert_eq!(Recipient::parse(&format!("Public/{id}")), Recipient::Id(id.to_owned()));
+        assert_eq!(Recipient::parse(&pk[..62]), Recipient::Id(pk[..62].to_owned()));
     }
 
     #[test]
