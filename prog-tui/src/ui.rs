@@ -76,24 +76,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
             );
         }
         Modal::Plan(view) => {
-            // At least 12 rows; a longer plan scrolls.
-            let width = 120;
-            let inner = usize::from(width.min(frame.area().width.saturating_sub(2)).saturating_sub(2)).max(1);
-            let wrapped: usize = view
-                .lines
-                .iter()
-                .map(|line| line.chars().count().div_ceil(inner).max(1))
-                .sum();
-            let height = u16::try_from(wrapped).unwrap_or(u16::MAX).saturating_add(2).max(12);
-            let area = centered(frame.area(), width, height);
-            frame.render_widget(Clear, area);
-            let visible = usize::from(area.height.saturating_sub(2));
-            let scrolls = wrapped > visible;
-            let scroll = view
-                .scroll
-                .get()
-                .min(u16::try_from(wrapped.saturating_sub(visible)).unwrap_or(u16::MAX));
-            view.scroll.set(scroll);
+            // As wide as its longest line (a command line, often), up to the screen; at least 12
+            // rows, as tall as it wraps to, and a plan taller than the screen scrolls.
+            let longest = view.lines.iter().map(|line| line.chars().count()).max().unwrap_or(0);
+            let width = u16::try_from(longest + 2)
+                .unwrap_or(u16::MAX)
+                .clamp(80, frame.area().width.saturating_sub(4).max(80));
+            let inner = width.min(frame.area().width.saturating_sub(2)).saturating_sub(2).max(1);
             let lines: Vec<Line> = view
                 .lines
                 .iter()
@@ -106,6 +95,20 @@ pub fn draw(frame: &mut Frame, app: &App) {
                     }
                 })
                 .collect();
+            let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+            // Counted by ratatui's own word wrap: a long argument that doesn't fit on a line's
+            // end moves whole to the next, so dividing by the width undercounts.
+            let wrapped = paragraph.line_count(inner);
+            let height = u16::try_from(wrapped).unwrap_or(u16::MAX).saturating_add(2).max(12);
+            let area = centered(frame.area(), width, height);
+            frame.render_widget(Clear, area);
+            let visible = usize::from(area.height.saturating_sub(2));
+            let scrolls = wrapped > visible;
+            let scroll = view
+                .scroll
+                .get()
+                .min(u16::try_from(wrapped.saturating_sub(visible)).unwrap_or(u16::MAX));
+            view.scroll.set(scroll);
             let keys = if scrolls { " · ↑↓ PgUp/PgDn scroll" } else { "" };
             let (footer, color) = match &view.call {
                 None if view.read_only => (format!(" read-only · Esc closes{keys} "), Color::Cyan),
@@ -113,7 +116,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
                 None => (format!(" nothing to send (see above) · Esc closes{keys} "), Color::Red),
             };
             frame.render_widget(
-                Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((scroll, 0)).block(
+                paragraph.scroll((scroll, 0)).block(
                     Block::bordered()
                         .title(if view.read_only {
                             format!(" {} ", view.title)
