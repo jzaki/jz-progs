@@ -1479,6 +1479,10 @@ impl App {
         let Some(guest) = self.guests.get(self.selected_guest).cloned() else {
             return;
         };
+        // lez-programs' programs deploy with `spel deploy`.
+        if matches!(guest.origin, Origin::Program(_)) && !self.spel_ready() {
+            return;
+        }
         let Some(payer) = self.need("PAYER (key P)", self.saved.payer.clone().as_ref()) else {
             return;
         };

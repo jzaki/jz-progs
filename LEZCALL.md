@@ -250,9 +250,9 @@ These are prog-tui's calls to a guest with no spel IDL: one whose message isn't 
 - **Without `lez-dryrun`:** the pane shows the encoded message and a `wallet program call` with just `to`. `to` signs when asked, or when the source hints it. That call is sent unchecked.
 - **Without `wallet program call`** (LEZ v0.4.0-rc3): the plan shows, and the pane says it can't be sent with this wallet.
 - **PDAs** the call declares are watched in the Accounts pane, as `PDA of <program>`.
-- **Deploying** (`d`, `u`, the walkthrough) is the wallet's alone:
-  1. a fresh header account, and one fresh segment account per 96 KiB of the guest's user ELF (read from the `.bin` header);
-  2. then `wallet program-loader deploy`, paid by `PAYER`.
+- **Deploying** (`d`, `u`, the walkthrough), paid by `PAYER`:
+  - **jz guests** go through the wallet: a fresh header account, and one fresh segment account per 96 KiB of the guest's user ELF (read from the `.bin` header); then `wallet program-loader deploy`.
+  - **lez-programs' programs** go through `spel deploy`, which makes the same accounts itself (saving them before the upload) and prints the header's id. It needs spel built.
 - **`b`** builds the wallet in LEZ, lez-programs' programs and the jz guests in lez-programs, then `spel`, `lez-call` and `lez-dryrun` in their own checkouts.
 
 ## 7. Where it lives

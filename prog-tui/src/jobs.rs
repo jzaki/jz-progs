@@ -750,15 +750,59 @@ pub async fn choose_payer(ctx: &mut Ctx) -> anyhow::Result<String> {
     bail!("no funded imported account in the wallet; initialise it first (key i)")
 }
 
-/// Deploys a built guest through `program_loader`: a fresh header account and one fresh segment
-/// account per chunk of its code, then `wallet program-loader deploy`, paid by `payer` (the new
-/// accounts can't pay for their own claim). The header's id is the program's id.
+/// Deploys a built guest through `program_loader`, paid by `payer` (the new header and segment
+/// accounts can't pay for their own claim). The header's id is the program's id. lez-programs'
+/// programs (LEZ v0.4) go through `spel deploy`, like their calls; jz guests through the wallet.
 pub async fn deploy(ctx: &mut Ctx, guest: &Guest, payer: &str) -> anyhow::Result<Deployment> {
+    if !guest.bin.is_file() {
+        bail!("{} doesn't exist; build first (key b)", guest.bin.display());
+    }
+    let program_id = match guest.origin {
+        Origin::Program(_) => spel_deploy(ctx, guest, payer).await?,
+        _ => wallet_deploy(ctx, guest, payer).await?,
+    };
+    ctx.log(format!("deployed {} → {program_id}", guest.name));
+    let deployment = Deployment {
+        name: guest.name.clone(),
+        program_id,
+        stale: false,
+        origin: guest.origin.clone(),
+    };
+    ctx.send(Msg::Deployed(deployment.clone()));
+    Ok(deployment)
+}
+
+/// `spel deploy`: it makes the header and segment accounts itself, saving them to the wallet
+/// before uploading, and returns the program's id.
+async fn spel_deploy(ctx: &mut Ctx, guest: &Guest, payer: &str) -> anyhow::Result<String> {
+    let args = [
+        "deploy".to_owned(),
+        guest.bin.display().to_string(),
+        "--fee-payer".to_owned(),
+        payer.to_owned(),
+    ];
+    let command = ctx.tool(&SPEL, &args)?;
+    let output = ctx.run_ok(&format!("spel deploy {}", guest.name), command).await?;
+    parse_spel_deploy(&output)
+        .ok_or_else(|| anyhow!("spel didn't report deploying {}", guest.name))
+}
+
+/// The program id from `spel deploy`'s output: the `header account: <id>` it reports, confirmed
+/// by the bare `<id>` it prints on stdout once the deploy lands. Its stdout and stderr arrive
+/// interleaved, so their order isn't relied on.
+fn parse_spel_deploy(output: &str) -> Option<String> {
+    let header = output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("header account:"))?
+        .trim();
+    (!header.is_empty() && output.lines().any(|line| line.trim() == header)).then(|| header.to_owned())
+}
+
+/// A fresh header account and one fresh segment account per chunk of the guest's code, then
+/// `wallet program-loader deploy`. Returns the program's id.
+async fn wallet_deploy(ctx: &mut Ctx, guest: &Guest, payer: &str) -> anyhow::Result<String> {
     let bin = guest.bin.clone();
     let name = guest.name.as_str();
-    if !bin.is_file() {
-        bail!("{} doesn't exist; build first (key b)", bin.display());
-    }
     let segments = guest_bin::segment_count(&fs::read(&bin)?)
         .ok_or_else(|| anyhow!("{} isn't a risc0 program binary", bin.display()))?;
     let header = new_account(ctx, "").await?;
@@ -782,16 +826,7 @@ pub async fn deploy(ctx: &mut Ctx, guest: &Guest, payer: &str) -> anyhow::Result
     if !output.contains(&format!("Header account id: {header}")) {
         bail!("the wallet didn't report deploying {name} at {header}");
     }
-    let program_id = header;
-    ctx.log(format!("deployed {name} → {program_id}"));
-    let deployment = Deployment {
-        name: name.to_owned(),
-        program_id,
-        stale: false,
-        origin: guest.origin.clone(),
-    };
-    ctx.send(Msg::Deployed(deployment.clone()));
-    Ok(deployment)
+    Ok(header)
 }
 
 /// One call to make, as the form gives it.
@@ -1541,7 +1576,8 @@ macro_rules! step {
     }};
 }
 
-/// WALKTHROUGH.md, from a clean chain: lez-programs' token program, deployed and called with spel.
+/// WALKTHROUGH.md, from a clean chain: lez-programs' token program, deployed (`spel deploy`) and
+/// called (`spel send`) with spel.
 pub async fn walkthrough(ctx: &mut Ctx, stop: Option<StopTarget>) -> anyhow::Result<()> {
     ctx.send(Msg::Checklist(
         walkthrough_steps(&ctx.network).iter().map(|step| (*step).to_owned()).collect(),
@@ -1621,6 +1657,22 @@ mod tests {
         let with_header = format!("(acc, prog): 9 bytes\n{json}");
         assert_eq!(parse_inspect(&with_header).as_deref(), Some("{\"greetings\":\"test1\"}"));
         assert_eq!(parse_inspect("nothing"), None);
+    }
+
+    #[test]
+    fn reads_spel_deploy_output() {
+        let id = "B6Es5QgFbbB47PLmrBW7qnFzATpXeRrBG2P3XdKQs86C";
+        // stdout's bare id can arrive before stderr's last lines.
+        let output = format!(
+            "📦 Deploying token.bin (300000 bytes, 4 segments), fee payer 6iArKUXx\n   header account: {id}\n\
+             Transaction hash is 1f2e\n{id}\n✅ Program deployed. Address it with --program {id},\n"
+        );
+        assert_eq!(parse_spel_deploy(&output).as_deref(), Some(id));
+        let unconfirmed = format!("   header account: {id}\n❌ Deploy failed: Timeout\n");
+        assert_eq!(parse_spel_deploy(&unconfirmed), None);
+        let mismatched = format!("   header account: {id}\nSomeOtherId\n");
+        assert_eq!(parse_spel_deploy(&mismatched), None);
+        assert_eq!(parse_spel_deploy("nothing"), None);
     }
 
     #[test]

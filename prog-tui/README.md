@@ -53,7 +53,7 @@ It uses three checkouts next to `jz-progs`. Press `L` to point it at others; the
 |---|---|---|
 | **LEZ** | `../../logos-execution-zone` | The sequencer, the wallet (`target/release/wallet`) and its debug home, `just clean`, `just wallet-import-test-accounts` |
 | **lez-programs** | `../../lez-programs` | The programs it builds and deploys, their spel IDLs (`artifacts/<program>-idl.json`), and the `jz/` package your guests build in |
-| **spel** | `../../spel`, or `spel` on `PATH` | Calls (`spel send`) to lez-programs' programs and to your guests, your guests' IDLs (`spel generate-idl`), and reading state (`spel inspect`) |
+| **spel** | `../../spel`, or `spel` on `PATH` | Deploying lez-programs' programs (`spel deploy`), calls (`spel send`) to lez-programs' programs and to your guests, your guests' IDLs (`spel generate-idl`), and reading state (`spel inspect`) |
 
 Keep LEZ at the tag lez-programs pins (`v0.4.0-rc3` today), and spel on its `refactor/lez-v0.4.x` branch, which pins the same tag. A mismatch shows up as a sequencer that refuses transactions it can't decode.
 
@@ -101,7 +101,7 @@ Keep LEZ at the tag lez-programs pins (`v0.4.0-rc3` today), and spel on its `ref
 | `t` | Native token transfer. Prefilled from `PAYER` to the selected account (or `ACCOUNT`) |
 | `w` / `x` | Watch an account outside the wallet, such as a PDA, so the Accounts pane shows it (◇) and the middle pane shows its actor states / forget the selected watched account. A call that declares a PDA watches it by itself. A reset forgets them all |
 | `v` | Show the messages the selected guest (or deployment) accepts, from its spel IDL. For a guest without one, `lez-call iface` reads its source: the handler named in `actor_entrypoint!`, its message type, and each variant's Borsh index, params, doc comment and hints (below). A deployment prog-tui doesn't know is matched to one of your built guests by the image id in its on-chain header (`lez-dryrun source-of`) |
-| `d` | Deploy the selected guest (Guests pane): a header account and one segment account per 96 KiB of its code, then `wallet program-loader deploy`, paid by `PAYER` |
+| `d` | Deploy the selected guest (Guests pane), paid by `PAYER`: a header account and one segment account per 96 KiB of its code, then the upload. lez-programs' programs deploy with `spel deploy` (spel must be built); your guests with `wallet program-loader deploy` |
 | `u` | Build and deploy a guest from `jz-progs/example_progs` (see below) |
 | `c` | Call the selected deployment (Deployed pane). Pick a message, fill in its fields, check the plan, then send. See below |
 | `x` | Forget the selected deployment |
