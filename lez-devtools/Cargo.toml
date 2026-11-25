@@ -1,0 +1,27 @@
+[package]
+name = "lez-devtools"
+version = "0.1.0"
+edition = "2024"
+description = "Local-chain helpers for testing LEZ programs: genesis private funds, audits, keys, blocks"
+publish = false
+
+# Its own workspace: it builds against a LEZ checkout next to jz-progs, by path, with LEZ's
+# Cargo.lock and toolchain, as lez-dryrun does.
+[workspace]
+
+[dependencies]
+wallet = { path = "../../logos-execution-zone/lez/wallet" }
+common = { path = "../../logos-execution-zone/lez/common" }
+lee_core = { path = "../../logos-execution-zone/lee/state_machine/core", features = ["host"] }
+# The local chain's genesis private accounts, to bootstrap private funds.
+testnet_initial_state = { path = "../../logos-execution-zone/lez/testnet_initial_state" }
+
+anyhow = "1.0.98"
+borsh = "1.5.7"
+clap = { version = "4.5.42", features = ["derive"] }
+hex = "0.4.3"
+tokio = { version = "1.50", features = ["macros", "rt-multi-thread"] }
+
+# As LEZ's: an unoptimized executor runs guests slowly.
+[profile.dev]
+opt-level = 1

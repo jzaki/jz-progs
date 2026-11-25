@@ -1,0 +1,329 @@
+{
+  "version": "2",
+  "name": "multisig",
+  "messages": [
+    {
+      "name": "InitSeat",
+      "tag": 0,
+      "docs": "Write the seat's secret, once. Every pseudonym derives from it.",
+      "fields": [
+        {
+          "name": "secret",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Create",
+      "tag": 1,
+      "docs": "Create `vault`: `members` (pseudonyms, the caller's included) and `threshold` approvals.",
+      "fields": [
+        {
+          "name": "vault",
+          "type": "account_id"
+        },
+        {
+          "name": "placement",
+          "type": {
+            "defined": "Placement"
+          }
+        },
+        {
+          "name": "create_key",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "members",
+          "type": {
+            "vec": "account_id"
+          }
+        },
+        {
+          "name": "threshold",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "Propose",
+      "tag": 2,
+      "docs": "Propose `action`, approving it.",
+      "fields": [
+        {
+          "name": "vault",
+          "type": "account_id"
+        },
+        {
+          "name": "create_key",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "action",
+          "type": {
+            "defined": "Action"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Approve",
+      "tag": 3,
+      "docs": "Approve proposal `id`. The approval that meets the threshold runs the action.",
+      "fields": [
+        {
+          "name": "vault",
+          "type": "account_id"
+        },
+        {
+          "name": "create_key",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "id",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "Sweep",
+      "tag": 4,
+      "docs": "Forward whatever a retired hidden vault holds to its successor.",
+      "fields": [
+        {
+          "name": "vault",
+          "type": "account_id"
+        },
+        {
+          "name": "create_key",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "state": {
+    "defined": "VaultState"
+  },
+  "types": [
+    {
+      "name": "Action",
+      "kind": "enum",
+      "variants": [
+        {
+          "name": "Transfer",
+          "fields": [
+            {
+              "name": "to",
+              "type": "account_id"
+            },
+            {
+              "name": "amount",
+              "type": "u128"
+            }
+          ]
+        },
+        {
+          "name": "AddMember",
+          "fields": [
+            {
+              "name": "member",
+              "type": "account_id"
+            },
+            {
+              "name": "threshold",
+              "type": "u8"
+            },
+            {
+              "name": "successor",
+              "type": {
+                "option": "account_id"
+              }
+            }
+          ]
+        },
+        {
+          "name": "RemoveMember",
+          "fields": [
+            {
+              "name": "member",
+              "type": "account_id"
+            },
+            {
+              "name": "threshold",
+              "type": "u8"
+            },
+            {
+              "name": "successor",
+              "type": {
+                "option": "account_id"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Config",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "create_key",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "generation",
+          "type": "u64"
+        },
+        {
+          "name": "members",
+          "type": {
+            "vec": "account_id"
+          }
+        },
+        {
+          "name": "threshold",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "Pending",
+      "kind": "enum",
+      "variants": [
+        {
+          "name": "Rotate",
+          "fields": [
+            {
+              "name": "0",
+              "type": {
+                "defined": "Config"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Sweep"
+        }
+      ]
+    },
+    {
+      "name": "Placement",
+      "kind": "enum",
+      "variants": [
+        {
+          "name": "Public"
+        },
+        {
+          "name": "Hidden"
+        }
+      ]
+    },
+    {
+      "name": "Proposal",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "id",
+          "type": "u64"
+        },
+        {
+          "name": "action",
+          "type": {
+            "defined": "Action"
+          }
+        },
+        {
+          "name": "approvals",
+          "type": {
+            "vec": "account_id"
+          },
+          "docs": "The members (pseudonyms) who approved it, the proposer first."
+        }
+      ]
+    },
+    {
+      "name": "VaultState",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "placement",
+          "type": {
+            "defined": "Placement"
+          }
+        },
+        {
+          "name": "config",
+          "type": {
+            "defined": "Config"
+          }
+        },
+        {
+          "name": "seed",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          },
+          "docs": "The vault's PDA seed, which every custody transfer out of it carries."
+        },
+        {
+          "name": "proposals",
+          "type": {
+            "vec": {
+              "defined": "Proposal"
+            }
+          }
+        },
+        {
+          "name": "next_id",
+          "type": "u64"
+        },
+        {
+          "name": "retired",
+          "type": {
+            "option": "account_id"
+          },
+          "docs": "The vault this one was rotated to. A retired vault only forwards funds."
+        },
+        {
+          "name": "pending",
+          "type": {
+            "option": {
+              "defined": "Pending"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

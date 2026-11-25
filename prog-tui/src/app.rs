@@ -670,8 +670,8 @@ impl App {
                     read_only: true,
                 });
             }
-            Msg::Watch(id, note) => {
-                if self.saved.watch(id.clone(), note) {
+            Msg::Watch(id, note, pda) => {
+                if self.saved.watch(id.clone(), note, pda) {
                     self.push_log(format!("watching {id} in the Accounts pane"));
                     self.last_views = None;
                 }
@@ -1075,7 +1075,8 @@ impl App {
         }
     }
 
-    /// `b` on the L1 view: pick the LEZ account to credit, `ACCOUNT` first selected.
+    /// `b` on the L1 view: pick the LEZ account to credit, `ACCOUNT` first selected: the wallet's
+    /// public accounts, then the watched ones, then any other account, typed in the form.
     fn open_bridge(&mut self) {
         if !self.l1.running() || self.l1.node.as_ref().and_then(|node| node.chain.as_ref()).is_none() {
             self.push_log("✗ bridging needs the L1 node running (s starts it)".to_owned());
@@ -1083,14 +1084,7 @@ impl App {
         }
         let accounts: Vec<WalletAccount> =
             self.accounts.iter().filter(|account| account.public).cloned().collect();
-        if accounts.is_empty() {
-            self.push_log(format!(
-                "✗ no public LEZ accounts on {}: i initialises the wallet, n makes one (LEZ view)",
-                self.network.label()
-            ));
-            return;
-        }
-        let options: Vec<(String, PickAction)> = accounts
+        let mut options: Vec<(String, PickAction)> = accounts
             .iter()
             .map(|account| {
                 let mut label = account.id.clone();
@@ -1109,6 +1103,26 @@ impl App {
                 (label, PickAction::BridgeTo(account.id.clone()))
             })
             .collect();
+        // A watched PDA a call made is named by its evidence; any other watched account by id,
+        // which the deposit can name only with the `account` metadata form.
+        for watched in &self.saved.watched {
+            if accounts.iter().any(|account| account.id == watched.id) {
+                continue;
+            }
+            let mut label = format!("{} [{}] (watched)", watched.id, watched.note);
+            if let Some(Some(view)) = self.views.get(&watched.id) {
+                label.push_str(&format!("  balance {}", view.balance()));
+            }
+            let to = watched
+                .pda
+                .as_ref()
+                .map_or_else(|| watched.id.clone(), |pda| format!("pda:{pda}"));
+            options.push((label, PickAction::BridgeTo(to)));
+        }
+        options.push((
+            "another account: its public key (64 hex), pda:<program>/<seed>, or id".to_owned(),
+            PickAction::BridgeTo(String::new()),
+        ));
         let selected = accounts
             .iter()
             .position(|account| self.saved.account.as_deref() == Some(&account.id))
@@ -1154,6 +1168,18 @@ impl App {
             .map(|(_, address)| address.clone())
     }
 
+    /// A watched PDA typed by id, named by the evidence its call recorded.
+    fn with_watched_evidence(&self, to: l1::LezRecipient) -> l1::LezRecipient {
+        let l1::LezRecipient::Id(id) = &to else { return to };
+        self.saved
+            .watched
+            .iter()
+            .find(|watched| &watched.id == id)
+            .and_then(|watched| watched.pda.as_ref())
+            .and_then(|pda| l1::LezRecipient::parse(&format!("pda:{pda}")).ok())
+            .unwrap_or(to)
+    }
+
     /// The deposit's details, after the LEZ account is picked. The L1 address defaults to the
     /// wallet holding the most.
     fn bridge_form(&self, to: String) -> Form {
@@ -1161,7 +1187,10 @@ impl App {
         Form::new(
             "Bridge L1 → LEZ (L1 module channel_deposit_with_notes)".to_owned(),
             vec![
-                ("to\nthe LEZ account credited (public)".to_owned(), to),
+                (
+                    "to\nthe LEZ account credited: a wallet account's id, a public key (64 hex), or pda:<program>/<seed>".to_owned(),
+                    to,
+                ),
                 ("amount".to_owned(), String::new()),
                 ("from (L1)\nthe L1 address that pays the note, the fees and takes the change, hex".to_owned(), from),
                 (
@@ -1742,7 +1771,19 @@ impl App {
                 });
             }
             FormAction::Bridge => {
-                let to = jobs::bare_account_id(&values[0]).to_owned();
+                let to = match l1::LezRecipient::parse(&values[0]) {
+                    Ok(to) if !to.id().is_empty() => self.with_watched_evidence(to),
+                    Ok(_) => {
+                        self.push_log("✗ to: which LEZ account? An id, a public key or pda:<program>/<seed>".to_owned());
+                        self.modal = Modal::Form(form);
+                        return;
+                    }
+                    Err(error) => {
+                        self.push_log(format!("✗ to: {error}"));
+                        self.modal = Modal::Form(form);
+                        return;
+                    }
+                };
                 let Some(amount) = values[1].parse::<u64>().ok().filter(|amount| *amount > 0) else {
                     self.push_log(format!("✗ amount must be a whole number above 0, not {:?}", values[1]));
                     self.modal = Modal::Form(form);
@@ -1847,7 +1888,7 @@ impl App {
                     return;
                 }
                 let note = if values[1].is_empty() { "watched".to_owned() } else { values[1].clone() };
-                self.on_msg(Msg::Watch(id, note));
+                self.on_msg(Msg::Watch(id, note, None));
             }
             FormAction::Plan {
                 ref program_id,

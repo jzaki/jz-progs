@@ -1,0 +1,168 @@
+{
+  "version": "2",
+  "name": "payroll",
+  "messages": [
+    {
+      "name": "Open",
+      "tag": 0,
+      "docs": "Open a payroll whose treasury is `treasury`, paying every `period_ms` milliseconds.\n\n`treasury` is the private PDA `AccountId::for_private_pda(program, seed, npk, vpk)`, where\n`seed` is the seat's account id and `npk`, `vpk` are the seat's keys. The guest can't\nderive it (it never sees the keys), so the seat stores it, once.",
+      "fields": [
+        {
+          "name": "treasury",
+          "type": "account_id"
+        },
+        {
+          "name": "period_ms",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "SetEmployee",
+      "tag": 1,
+      "docs": "Pay `employee` `amount` each period from now on. `amount` 0 stops their pay, and keeps\nwhat they are owed and were paid.",
+      "fields": [
+        {
+          "name": "employee",
+          "type": "account_id"
+        },
+        {
+          "name": "amount",
+          "type": "u128"
+        }
+      ]
+    },
+    {
+      "name": "Accrue",
+      "tag": 2,
+      "docs": "Add every employee's pay for each period up to and including `period` to what they are\nowed. Valid only once `period` has begun: at `period * period_ms` (Unix ms).",
+      "fields": [
+        {
+          "name": "period",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "Pay",
+      "tag": 3,
+      "docs": "Pay `employee` everything they are owed, from the treasury's native balance.",
+      "fields": [
+        {
+          "name": "employee",
+          "type": "account_id"
+        }
+      ]
+    },
+    {
+      "name": "Withdraw",
+      "tag": 4,
+      "docs": "Move `amount` of the treasury's native balance that nobody is owed back to the seat.",
+      "fields": [
+        {
+          "name": "amount",
+          "type": "u128"
+        }
+      ]
+    }
+  ],
+  "state": {
+    "defined": "PayrollState"
+  },
+  "types": [
+    {
+      "name": "Employee",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "account",
+          "type": "account_id"
+        },
+        {
+          "name": "amount",
+          "type": "u128",
+          "docs": "Pay per period."
+        },
+        {
+          "name": "owed",
+          "type": "u128",
+          "docs": "Accrued and not yet paid."
+        },
+        {
+          "name": "paid",
+          "type": "u128",
+          "docs": "Paid so far, in total."
+        }
+      ]
+    },
+    {
+      "name": "PayrollState",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "seed",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          },
+          "docs": "The treasury's PDA seed, which every custody transfer out of it carries."
+        },
+        {
+          "name": "period_ms",
+          "type": "u64",
+          "docs": "How long a pay period lasts, in the clock's milliseconds."
+        },
+        {
+          "name": "last_accrued",
+          "type": {
+            "option": "u64"
+          },
+          "docs": "The last period accrued, if any."
+        },
+        {
+          "name": "total_owed",
+          "type": "u128",
+          "docs": "The sum of every employee's `owed`: the part of the balance the seat can't withdraw."
+        },
+        {
+          "name": "total_paid",
+          "type": "u128",
+          "docs": "The sum of every employee's `paid`."
+        },
+        {
+          "name": "employees",
+          "type": {
+            "vec": {
+              "defined": "Employee"
+            }
+          }
+        },
+        {
+          "name": "pending_withdraw",
+          "type": {
+            "option": {
+              "defined": "Withdrawal"
+            }
+          },
+          "docs": "A withdrawal waiting for the treasury's native balance to answer `ReadState`."
+        }
+      ]
+    },
+    {
+      "name": "Withdrawal",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "amount",
+          "type": "u128"
+        },
+        {
+          "name": "to",
+          "type": "account_id"
+        }
+      ]
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 //! Fixtures for the handler tests: one hand-built `ReceiveInput` per message, compared against
 //! the exact expected `Response`. The conversation on a chain is covered by
-//! `jz-progs/multisig-runner`.
+//! `multisig.sh`, over spel's private calls.
 
 pub(crate) use borsh::BorshSerialize;
 pub(crate) use lee_core::{

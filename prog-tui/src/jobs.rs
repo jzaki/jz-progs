@@ -65,8 +65,9 @@ pub enum Msg {
     /// An actor state decoded through its spel IDL: `(account, program, bytes)` and the text.
     Decoded((String, String, Vec<u8>), String),
     Deployed(Deployment),
-    /// Show this account's state in the Accounts pane: `(id, note)`.
-    Watch(String, String),
+    /// Show this account's state in the Accounts pane: `(id, note, pda)`, the pda as
+    /// `<program>/0x<seed>` when known.
+    Watch(String, String, Option<String>),
     /// A call's plan to show: its title and text, and the call, when it can be sent.
     Plan {
         title: String,
@@ -827,8 +828,8 @@ pub struct PlannedCall {
     /// Each actor state the dry run changed, as `(account, program, after)`. Empty without a
     /// dry run.
     pub changes: Vec<(String, String, Vec<u8>)>,
-    /// The PDAs the call declares, to watch.
-    pub pdas: Vec<String>,
+    /// The PDAs the call declares, to watch: `(id, <program>/0x<seed>)`.
+    pub pdas: Vec<(String, Option<String>)>,
 }
 
 /// A call on screen, ready to send once confirmed.
@@ -1070,7 +1071,10 @@ pub async fn prepare(ctx: &mut Ctx, request: &CallRequest) -> anyhow::Result<Pre
         .into_iter()
         .flatten()
         .filter(|actor| actor["admission"] == "pda")
-        .filter_map(|actor| Some(actor["account"].as_str()?.to_owned()))
+        .filter_map(|actor| {
+            let pda = actor["pda"].as_str().map(str::to_owned);
+            Some((actor["account"].as_str()?.to_owned(), pda))
+        })
         .collect();
     let wallet_args = strings(&plan["wallet_args"]);
     lines.push(String::new());
@@ -1234,8 +1238,8 @@ pub async fn call(ctx: &mut Ctx, call: &PlannedCall) -> anyhow::Result<()> {
     let command = ctx.wallet(&call.wallet_args.iter().map(String::as_str).collect::<Vec<_>>());
     ctx.run_ok(&format!("wallet program call ({})", call.name), command)
         .await?;
-    for pda in &call.pdas {
-        ctx.send(Msg::Watch(pda.clone(), format!("PDA of {}", call.name)));
+    for (id, pda) in &call.pdas {
+        ctx.send(Msg::Watch(id.clone(), format!("PDA of {}", call.name), pda.clone()));
     }
     if call.changes.is_empty() {
         ctx.log("no dry run said what this changes, so there's nothing to check");

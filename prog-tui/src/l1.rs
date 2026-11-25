@@ -741,10 +741,59 @@ impl MetadataForm {
 
     pub fn name(self) -> &'static str {
         match self {
-            Self::Key => "key (01 00 ‖ pk, LEZ v0.4)",
+            Self::Key => "key: evidence, 01 00 ‖ pk or 01 01 ‖ program ‖ seed (LEZ v0.4)",
             Self::Account => "account (the 32-byte account id)",
         }
     }
+}
+
+/// The LEZ account a deposit credits, as entered. LEZ's bridge credits the account its metadata's
+/// evidence names (`PublicAccountEvidence`): a public key, or a PDA's program and seed. A bare id
+/// carries no evidence; the wallet supplies the pk of one it holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LezRecipient {
+    /// A base58 account id.
+    Id(String),
+    /// A public key (hex), and the account id it gives.
+    Key { pk: String, id: String },
+    /// `pda:<program>/<seed>`: the PDA of `program` (base58) for `seed`, and its id.
+    Pda { program: String, seed: [u8; 32], id: String },
+}
+
+impl LezRecipient {
+    /// `pda:<program>/<seed>` (the seed `0x` hex or a base58 account id), a 64-hex public key,
+    /// or a base58 account id (an optional `Public/` prefix dropped).
+    pub fn parse(text: &str) -> anyhow::Result<Self> {
+        let text = text.trim();
+        if let Some(pda) = text.strip_prefix("pda:") {
+            let (program, seed) = pda
+                .split_once('/')
+                .ok_or_else(|| anyhow!("a PDA is pda:<program>/<seed>, not {text:?}"))?;
+            let program_bytes = base58_32(program)
+                .ok_or_else(|| anyhow!("the PDA's program {program:?} isn't a base58 account id"))?;
+            let seed = match seed.strip_prefix("0x") {
+                Some(hex) => crate::rpc::unhex(hex).and_then(|bytes| bytes.try_into().ok()),
+                None => base58_32(seed),
+            }
+            .ok_or_else(|| anyhow!("the PDA's seed {seed:?} is neither 0x + 64 hex nor a base58 id"))?;
+            let id = crate::builtin::public_pda(&program_bytes, &seed);
+            return Ok(Self::Pda { program: program.to_owned(), seed, id });
+        }
+        Ok(match jobs::Recipient::parse(text) {
+            jobs::Recipient::Id(id) => Self::Id(id),
+            jobs::Recipient::Key { pk, id } => Self::Key { pk, id },
+        })
+    }
+
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Id(id) | Self::Key { id, .. } | Self::Pda { id, .. } => id,
+        }
+    }
+}
+
+fn base58_32(text: &str) -> Option<[u8; 32]> {
+    bs58::decode(text.trim()).into_vec().ok()?.try_into().ok()
 }
 
 /// A bridge deposit as asked for: `amount` of the L1 address `from`'s funds to the LEZ account
@@ -753,8 +802,8 @@ impl MetadataForm {
 pub struct BridgeRequest {
     /// The L1 address (hex) that pays: the deposited note, the fees and the change are its.
     pub from: String,
-    /// The LEZ account credited, base58.
-    pub to: String,
+    /// The LEZ account credited.
+    pub to: LezRecipient,
     pub amount: u64,
     /// The LEZ network's channel on the L1, hex.
     pub channel: String,
@@ -769,8 +818,9 @@ pub struct BridgeRequest {
 #[derive(Clone, Debug)]
 pub struct BridgeCall {
     pub request: BridgeRequest,
-    /// The LEZ account's public key, hex.
-    pub pk: String,
+    /// What names the LEZ account in the metadata, for the plan: `pk <hex>`, `PDA …`, or
+    /// none for the `account` form.
+    pub evidence: Option<String>,
     /// The deposit's metadata, hex.
     pub metadata: String,
     /// A note of `from` worth exactly `amount`, when there is one; otherwise sending splits one
@@ -831,6 +881,14 @@ pub fn deposit_metadata(pk: &str) -> anyhow::Result<String> {
         bail!("a LEZ public key is 32 bytes of hex, not {pk:?}");
     }
     Ok(format!("0100{pk}"))
+}
+
+/// A deposit's metadata for a PDA: tag 1 (`Identified`), evidence tag 1 (`Pda`), the program's
+/// id and the seed.
+pub fn pda_metadata(program: &str, seed: &[u8; 32]) -> anyhow::Result<String> {
+    let program =
+        base58_32(program).ok_or_else(|| anyhow!("{program:?} isn't a base58 account id"))?;
+    Ok(format!("0101{}{}", crate::rpc::hex(&program), crate::rpc::hex(seed)))
 }
 
 /// The other form: the LEZ account id's 32 bytes, as hex.
@@ -901,17 +959,28 @@ pub async fn plan_bridge(ctx: &mut Ctx, request: BridgeRequest) -> anyhow::Resul
     }
     let request = BridgeRequest { from, channel, ..request };
 
-    let keys = ctx.wallet(&["account", "get", "--keys", "-a", &format!("Public/{}", request.to)]);
-    let output = ctx.run_quiet("wallet account get --keys", keys).await?;
-    let pk = parse_pk(&output.out).ok_or_else(|| {
-        anyhow!(
-            "the LEZ wallet gave no public key for {}: is it a public account in this wallet?",
-            request.to
-        )
-    })?;
-    let metadata = match request.metadata {
-        MetadataForm::Key => deposit_metadata(&pk)?,
-        MetadataForm::Account => account_metadata(&request.to)?,
+    let (evidence, metadata) = match (request.metadata, &request.to) {
+        (MetadataForm::Account, to) => (None, account_metadata(to.id())?),
+        (MetadataForm::Key, LezRecipient::Key { pk, .. }) => {
+            (Some(format!("pk {pk}")), deposit_metadata(pk)?)
+        }
+        (MetadataForm::Key, LezRecipient::Pda { program, seed, .. }) => (
+            Some(format!("PDA of {program}, seed 0x{}", crate::rpc::hex(seed))),
+            pda_metadata(program, seed)?,
+        ),
+        (MetadataForm::Key, LezRecipient::Id(id)) => {
+            let keys = ctx.wallet(&["account", "get", "--keys", "-a", &format!("Public/{id}")]);
+            let output = ctx.run_quiet("wallet account get --keys", keys).await;
+            let pk = output.ok().and_then(|output| parse_pk(&output.out)).ok_or_else(|| {
+                anyhow!(
+                    "{} isn't a public account in this wallet, so its id alone can't name it: \
+                     enter its public key (64 hex) or pda:<program>/<seed> as `to`, or metadata \
+                     `account` if this network's bridge takes a bare id",
+                    jobs::short(id)
+                )
+            })?;
+            (Some(format!("pk {pk}")), deposit_metadata(&pk)?)
+        }
     };
 
     let notes = notes(&program, &request.from)
@@ -922,23 +991,23 @@ pub async fn plan_bridge(ctx: &mut Ctx, request: BridgeRequest) -> anyhow::Resul
         .iter()
         .find(|(_, value)| *value == request.amount)
         .map(|(id, _)| id.clone());
-    let lez_balance = ctx.rpc.account(&request.to).await?.map(|view| view.balance());
+    let lez_balance = ctx.rpc.account(request.to.id()).await?.map(|view| view.balance());
     let channel_state = call(&program, "get_channel_state", &[&request.channel]).await;
 
-    let call = BridgeCall { request, pk, metadata, note };
+    let call = BridgeCall { request, evidence, metadata, note };
     let request = &call.request;
     let mut lines = vec![
         format!("from L1     {}  ({} in {} note(s))", request.from, total, notes.len()),
         format!(
             "to LEZ      Public/{}  (balance {})",
-            request.to,
+            request.to.id(),
             lez_balance.map_or("not on chain yet".to_owned(), |b| b.to_string())
         ),
-        format!("  its pk    {}", call.pk),
         format!("amount      {}", request.amount),
         format!("max fee     {} per transaction", request.max_fee),
         format!("channel     {}  ({})", request.channel, ctx.network.label()),
         format!("metadata    {}  ({})", call.metadata, request.metadata.name()),
+        format!("  names     {}", call.evidence.as_deref().unwrap_or("the bare account id")),
         String::new(),
     ];
     match &channel_state {
@@ -977,7 +1046,7 @@ pub async fn plan_bridge(ctx: &mut Ctx, request: BridgeRequest) -> anyhow::Resul
             .to_owned(),
     );
     ctx.send(Msg::Plan {
-        title: format!("bridge {} → {}", request.amount, jobs::short(&request.to)),
+        title: format!("bridge {} → {}", request.amount, jobs::short(request.to.id())),
         lines,
         call: enough.then(|| Planned::Bridge(call.clone())),
     });
@@ -1046,7 +1115,7 @@ pub async fn bridge(ctx: &mut Ctx, call: &BridgeCall) -> anyhow::Result<()> {
     match landed {
         Some(_) => ctx.log(format!(
             "✓ deposit in an L1 block. LEZ credits Public/{} shortly after (under 30s in practice)",
-            jobs::short(&call.request.to)
+            jobs::short(call.request.to.id())
         )),
         None => ctx.log(
             "not in a block within 10 minutes: it waits in the node's mempool (keep the node running)",
@@ -1776,6 +1845,35 @@ mod tests {
     }
 
     #[test]
+    fn parses_lez_recipients() {
+        let pk = "0f8dd67e32040669f1f1471a762bacc8bef3e124959b3503b3f4a3d6ca7dbe21";
+        let key_id = "2iLgotABUSD6YSHvcgDiAfXGZijRfrKTPx6RTScphkTQ";
+        assert_eq!(
+            LezRecipient::parse(pk).unwrap(),
+            LezRecipient::Key { pk: pk.into(), id: key_id.into() }
+        );
+        assert_eq!(
+            LezRecipient::parse(&format!("Public/{key_id}")).unwrap(),
+            LezRecipient::Id(key_id.into())
+        );
+
+        // LEZ's own vector (`bridge_core::deposit` tests): program [4; 32], seed [6; 32].
+        let program = bs58::encode([4_u8; 32]).into_string();
+        let hex_seed = format!("0x{}", "06".repeat(32));
+        let by_hex = LezRecipient::parse(&format!("pda:{program}/{hex_seed}")).unwrap();
+        let by_base58 =
+            LezRecipient::parse(&format!("pda:{program}/{}", bs58::encode([6_u8; 32]).into_string())).unwrap();
+        assert_eq!(by_hex, by_base58);
+        assert_eq!(by_hex.id(), crate::builtin::public_pda(&[4; 32], &[6; 32]));
+        assert_eq!(
+            pda_metadata(&program, &[6; 32]).unwrap(),
+            format!("0101{}{}", "04".repeat(32), "06".repeat(32))
+        );
+        assert!(LezRecipient::parse("pda:nope").is_err());
+        assert!(LezRecipient::parse(&format!("pda:{program}/0x06")).is_err());
+    }
+
+    #[test]
     fn builds_deposit_metadata_like_lezs_bridge() {
         let pk = "1ea4a67bf2daadba6192c64a9324accb347050f1d4d29d8a28ceb3226bc85be4";
         // bridge_core's test: [1, 0] ++ key bytes.
@@ -1797,13 +1895,13 @@ mod tests {
         let call = BridgeCall {
             request: BridgeRequest {
                 from: "82da".into(),
-                to: "2bMv".into(),
+                to: LezRecipient::Id("2bMv".into()),
                 amount: 5,
                 channel: "d616".into(),
                 max_fee: 50_000,
                 metadata: MetadataForm::Key,
             },
-            pk: pk.into(),
+            evidence: Some(format!("pk {pk}")),
             metadata: deposit_metadata(pk).unwrap(),
             note: None,
         };

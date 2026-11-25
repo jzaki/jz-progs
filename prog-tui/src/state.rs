@@ -49,6 +49,10 @@ pub struct Watched {
     pub id: String,
     /// What it is, e.g. `PDA of jz_admin_seat`.
     pub note: String,
+    /// For a PDA a call made: `<program>/0x<seed>`, as lez-dryrun's plan gives it. A deposit
+    /// can name the PDA with it (the bridge needs evidence, not an id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pda: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -139,14 +143,18 @@ impl Saved {
     }
 
     /// Adds `id` to the watched accounts, or updates its note. Returns whether it was new.
-    pub fn watch(&mut self, id: String, note: String) -> bool {
+    /// Watches `id`, or updates its note. A PDA's evidence, once known, is kept.
+    pub fn watch(&mut self, id: String, note: String, pda: Option<String>) -> bool {
         match self.watched.iter_mut().find(|watched| watched.id == id) {
             Some(watched) => {
                 watched.note = note;
+                if pda.is_some() {
+                    watched.pda = pda;
+                }
                 false
             }
             None => {
-                self.watched.push(Watched { id, note });
+                self.watched.push(Watched { id, note, pda });
                 true
             }
         }
@@ -269,13 +277,14 @@ mod tests {
     #[test]
     fn watching_twice_updates_the_note_and_a_reset_forgets() {
         let mut saved = Saved::default();
-        assert!(saved.watch("PDA".into(), "first".into()));
-        assert!(!saved.watch("PDA".into(), "PDA of jz_admin_seat".into()));
+        assert!(saved.watch("PDA".into(), "first".into(), Some("P/0x01".into())));
+        assert!(!saved.watch("PDA".into(), "PDA of jz_admin_seat".into(), None));
         assert_eq!(
             saved.watched,
             vec![Watched {
                 id: "PDA".into(),
-                note: "PDA of jz_admin_seat".into()
+                note: "PDA of jz_admin_seat".into(),
+                pda: Some("P/0x01".into()),
             }]
         );
         saved.clear_chain();

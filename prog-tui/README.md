@@ -141,13 +141,18 @@ logosctl 1.0.0's daemon has segfaulted (in `libQt6RemoteObjects`) while calls to
 
 `b` deposits L1 funds into the channel of the LEZ network you chose, for a LEZ account that the sequencer then credits:
 
-1. Pick the LEZ account: the wallet's public accounts on this network, `ACCOUNT` (key `A` on the LEZ view) selected first. A private account can't receive a deposit this way.
+1. Pick the LEZ account: the wallet's public accounts on this network, `ACCOUNT` (key `A` on the LEZ view) selected first; then the watched accounts; then "another account", to type one in. A private account can't receive a deposit this way.
 2. Fill in the form:
+   - `to`: the LEZ account credited. LEZ's bridge credits the account the deposit's evidence names, not a bare id, so `to` takes:
+     - a wallet account's id: the wallet gives its pk;
+     - a public key, 64 hex (from `wallet account get --keys` on the recipient's side): any public account, new or used, in any wallet;
+     - `pda:<program>/<seed>`, the seed `0x` + 64 hex or a base58 id: a program's PDA. A watched PDA that a call made is prefilled this way, from lez-dryrun's plan;
+     - any other id: only with metadata `account`.
    - `amount`.
    - `from (L1)`: the address that pays the deposited note, the fees, and takes the change. It defaults to the wallet holding the most (`PoWClaim`, where mining rewards land).
    - `channel`: the network's `channel_id` in `networks.json`, else what its sequencer reports.
    - `max fee`: per transaction, default 50,000. A transfer paid about 10,000 on the devnet.
-   - `metadata`: how the deposit names its recipient. `key` (the default) is `01 00 ‖ pk`, LEZ v0.4.0-rc3's `bridge_core::DepositMetadata { recipient: Identified(Key(pk)) }`, with the pk from `wallet account get --keys`. `account` is the account id's 32 bytes, as the Logos Blockchain app's bridging guide describes for the LEZ testnet; LEZ v0.4.0-rc3's bridge rejects that form. Which one a network takes depends on its LEZ version.
+   - `metadata`: how the deposit names its recipient. `key` (the default) is the evidence form, LEZ v0.4.0-rc3's `bridge_core::DepositMetadata { recipient: Identified(evidence) }`: `01 00 ‖ pk` for a key, `01 01 ‖ program ‖ seed` for a PDA. `account` is the account id's 32 bytes, as the Logos Blockchain app's bridging guide describes for the LEZ testnet; LEZ v0.4.0-rc3's bridge rejects that form. Which one a network takes depends on its LEZ version.
 3. The plan shows the notes, the LEZ balance, the channel check, and the steps with their exact commands. Enter sends:
    1. When `from` has no note of exactly `amount`, a transfer from `from` to itself splits one off (`wallet_transfer_funds`, fee paid), and the job waits for it to land in a block.
    2. The deposit spends that note, with `from` paying the fee from its other notes and taking the change:

@@ -368,7 +368,7 @@ Two ways, depending on how big it is.
 - a timestamp validity window in place of a clock read;
 - the accrue-then-pay pattern, which keeps funds safe because a stored async credit can't bounce.
 
-It runs through [payroll-runner](payroll-runner/README.md), since no CLI at v0.4.0-rc3 sends a private call to a custom program.
+It runs through [payroll.sh](example_progs/payroll/payroll.sh), which sends its private calls with spel (branch `feat/private-calls`). [example_progs/multisig](example_progs/multisig/README.md) does the same for an M-of-N vault, with `multisig.sh`.
 
 What to design around, such as authorization, who sent a message, stored messages and replies, is in the manual's Part I. If you are porting a v0.2 program, use [GUIDE_v0.2_v0.4.md](GUIDE_v0.2_v0.4.md).
 
@@ -400,9 +400,9 @@ Whether a message to an actor runs now or is stored for later depends on whether
 
 **Observed with `example_progs/payroll`** (2026-11-19, local, v0.4.0-rc3):
 - A private PDA's native transfer to a foreign private account was published sealed, and its owner collected it with `wallet pending receive`.
-- A private transaction's fee must come from a private account. On a fresh chain the first private funds come from a genesis private account's pending credit (payroll-runner's `import-genesis-private`).
+- A private transaction's fee must come from a private account. On a fresh chain the first private funds come from a genesis private account's pending credit (`lez-devtools import-genesis-private`).
 - The wallet needs `RISC0_DEV_MODE=1` too, or it builds real proofs.
-- [payroll-runner/README.md](payroll-runner/README.md) has the session.
+- [example_progs/payroll/README.md](example_progs/payroll/README.md) has the session.
 
 ---
 

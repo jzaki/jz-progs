@@ -3607,6 +3607,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lez-devtools"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "borsh",
+ "clap",
+ "common",
+ "hex",
+ "lee_core",
+ "testnet_initial_state",
+ "tokio",
+ "wallet",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5121,33 +5136,6 @@ checksum = "577c63b00ad74d57e8c9aa870b5fccebf2fd64a308a5aee9f1bb88e4aea19447"
 dependencies = [
  "serde",
  "unsigned-varint 0.8.0",
-]
-
-[[package]]
-name = "multisig-runner"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "borsh",
- "clap",
- "common",
- "hex",
- "key_protocol",
- "lee",
- "lee_core",
- "multisig_core",
- "rand 0.8.6",
- "testnet_initial_state",
- "tokio",
- "wallet",
-]
-
-[[package]]
-name = "multisig_core"
-version = "0.1.0"
-dependencies = [
- "borsh",
- "lee_core",
 ]
 
 [[package]]
