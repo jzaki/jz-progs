@@ -30,3 +30,7 @@ Programs written for 0.2 or 0.3 will need porting to 0.4. The program interface 
 - What the actor manual changed from the plan/apply manual ([mdbook-diffs.md](mdbook-diffs.md)).
 - A local build-and-run path for lez-programs' programs, with fees, the program loader and spel, as prose (INTRO.md), as a command list (WALKTHROUGH.md) and as a TUI (`prog-tui`).
 - Where the repo's own example README and runners are out of date.
+
+---
+
+> This is an independent community project intended to demonstrate some of the capabilities and potential uses of the Logos technology stack. It has been developed independently by its contributor(s) and is not built for, on behalf of, or as part of the work of Logos or the Institute of Free Technology. It has not been reviewed, audited, approved, or endorsed by Logos or the Institute of Free Technology. The project, including its code, documentation, views, and functionality, is the sole responsibility of its contributor(s) and should not be attributed to Logos or the Institute of Free Technology.

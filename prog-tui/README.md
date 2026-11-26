@@ -379,3 +379,7 @@ lez-call call $G/jz_hello_world.rs --payer "Public/$PAYER" --program "$PROGRAM_J
 ```
 
 The last line encodes and sends in one go, through `$LEZ_WALLET program call`, with the actors you give and no dry run. A program with several messages takes the message's name, then its values as `name=value` or in order: `… Mint to=holder amount=30`. `--json` prints one `LEZCALL {json}` (or `LEZDRYRUN {json}`) line instead of text. `--help` shows the rest.
+
+---
+
+> This is an independent community project intended to demonstrate some of the capabilities and potential uses of the Logos technology stack. It has been developed independently by its contributor(s) and is not built for, on behalf of, or as part of the work of Logos or the Institute of Free Technology. It has not been reviewed, audited, approved, or endorsed by Logos or the Institute of Free Technology. The project, including its code, documentation, views, and functionality, is the sole responsibility of its contributor(s) and should not be attributed to Logos or the Institute of Free Technology.
